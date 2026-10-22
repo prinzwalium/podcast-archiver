@@ -40,7 +40,11 @@ func Load() (*Config, error) {
 		MaxFeedsPerUser:  100,
 		SSRFAllowPrivate: os.Getenv("PA_SSRF_ALLOW_PRIVATE") == "true",
 
-		OIDCIssuer:        strings.TrimRight(os.Getenv("PA_OIDC_ISSUER"), "/"),
+		// Keep the issuer exactly as configured; go-oidc requires an exact
+		// match with the issuer in the provider's discovery document, and
+		// Authentik includes the trailing slash there. If the user omitted
+		// it, try with the slash appended on mismatch instead of failing hard.
+		OIDCIssuer:        os.Getenv("PA_OIDC_ISSUER"),
 		OIDCClientID:      os.Getenv("PA_OIDC_CLIENT_ID"),
 		OIDCClientSecret:  os.Getenv("PA_OIDC_CLIENT_SECRET"),
 		OIDCRedirectURL:   os.Getenv("PA_OIDC_REDIRECT_URL"),

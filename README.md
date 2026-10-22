@@ -30,6 +30,8 @@ Or with `compose.yaml` (see the file for all options): `docker compose up -d`.
 | `PA_SECRET_KEY` | — (required) | ≥32 chars, signs session cookies. `openssl rand -hex 32` |
 | `PA_EXTERNAL_URL` | `http://localhost:8080` | Public base URL; used to build feed/media URLs |
 | `PA_LISTEN_ADDR` | `:8080` | Listen address |
+| `PUID` / `PGID` | `1000` / `1000` | Run the process as this UID/GID (Unraid convention; match your `/data` share ownership) |
+| `UMASK` | `022` | File permission mask applied to downloaded files and the database |
 | `PA_DATA_DIR` | `/data` (in container) | Database + downloaded media |
 | `PA_SYNC_INTERVAL` | `6h` | Feed refresh interval (min `1m`) |
 | `PA_MAX_EPISODE_BYTES` | `1073741824` | Hard size cap per episode file |
