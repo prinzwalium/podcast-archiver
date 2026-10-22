@@ -1,0 +1,90 @@
+package store
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+type DB struct {
+	*sql.DB
+}
+
+var ErrNotFound = errors.New("not found")
+
+func Open(path string) (*DB, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1) // SQLite: single writer avoids SQLITE_BUSY
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	return &DB{db}, nil
+}
+
+func migrate(db *sql.DB) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS users (
+			id INTEGER PRIMARY KEY,
+			sub TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS feeds (
+			id INTEGER PRIMARY KEY,
+			user_id INTEGER NOT NULL REFERENCES users(id),
+			source_url TEXT NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
+			image_url TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			link TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL,
+			last_sync INTEGER NOT NULL DEFAULT 0,
+			last_error TEXT NOT NULL DEFAULT '',
+			CONSTRAINT uq_user_feed UNIQUE (user_id, source_url)
+		)`,
+		`CREATE TABLE IF NOT EXISTS episodes (
+			id INTEGER PRIMARY KEY,
+			feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
+			guid TEXT NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
+			published INTEGER NOT NULL DEFAULT 0,
+			description TEXT NOT NULL DEFAULT '',
+			enclosure_url TEXT NOT NULL,
+			enclosure_bytes INTEGER NOT NULL DEFAULT 0,
+			mime_type TEXT NOT NULL DEFAULT 'audio/mpeg',
+			duration_secs INTEGER NOT NULL DEFAULT 0,
+			image_url TEXT NOT NULL DEFAULT '',
+			file_path TEXT NOT NULL DEFAULT '',
+			file_bytes INTEGER NOT NULL DEFAULT 0,
+			downloaded INTEGER NOT NULL DEFAULT 0,
+			CONSTRAINT uq_feed_guid UNIQUE (feed_id, guid)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_episodes_feed ON episodes(feed_id, published DESC)`,
+		`CREATE TABLE IF NOT EXISTS feed_tokens (
+			id INTEGER PRIMARY KEY,
+			feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
+			token TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL
+		)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			return fmt.Errorf("%w: %s", err, s)
+		}
+	}
+	return nil
+}
+
+func now() int64 { return time.Now().Unix() }

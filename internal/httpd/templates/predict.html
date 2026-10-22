@@ -1,0 +1,21 @@
+{{define "content"}}
+<div class="card">
+  <h2 style="margin-top:0">Predict archive size</h2>
+  <form method="POST" action="/predict" style="display:flex;gap:0.5rem">
+    <input type="url" name="url" placeholder="https://example.com/feed.xml" required>
+    <button type="submit">Estimate</button>
+  </form>
+  {{if .Prediction}}
+  <div style="margin-top:1rem">
+    <p><strong>{{.Prediction.Title}}</strong></p>
+    <p>{{.Prediction.Episodes}} episodes with enclosures</p>
+    <p>Estimated archive size: <strong>{{.PredictionBytesFmt}}</strong><br>
+    <span class="muted">Based on enclosure metadata from {{.Prediction.NumSized}} of {{.Prediction.Episodes}} items (feeds without sizes are excluded from the estimate).</span></p>
+    <form method="POST" action="/feeds" style="display:flex;gap:0.5rem">
+      <input type="hidden" name="url" value="{{.PredictionURL}}">
+      <button type="submit">Archive this feed</button>
+    </form>
+  </div>
+  {{end}}
+</div>
+{{end}}

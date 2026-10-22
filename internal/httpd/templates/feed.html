@@ -1,0 +1,39 @@
+{{define "content"}}
+<div class="card">
+  <h2 style="margin-top:0">{{.Feed.Title}}</h2>
+  <p class="muted">{{.Feed.SourceURL}}</p>
+  <p>{{.Stats.TotalEpisodes}} episodes · {{.Stats.Downloaded}} downloaded · {{.Stats.DownloadedBytesFmt}} on disk · {{.Stats.TotalBytesFmt}} total predicted</p>
+  {{if .Feed.LastError}}<p style="color:var(--danger)">Last sync error: {{.Feed.LastError}}</p>{{end}}
+  <form class="inline" method="POST" action="/feeds/{{.Feed.ID}}/sync"><button type="submit">Sync now</button></form>
+  <form class="inline" method="POST" action="/feeds/{{.Feed.ID}}/delete" onsubmit="return confirm('Delete archive and metadata?')"><button class="danger" type="submit">Delete archive</button></form>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Podcatcher feed URLs</h3>
+  <p class="muted">Add one of these URLs to your podcast app. Tokens can be revoked anytime.</p>
+  {{if .Tokens}}
+  <table>
+    {{range .Tokens}}
+    <tr>
+      <td><code>{{$.ExternalURL}}/feed/{{.Token}}</code></td>
+      <td><form class="inline" method="POST" action="/feeds/{{$.Feed.ID}}/tokens/{{.Token}}/delete"><button class="danger" type="submit">Revoke</button></form></td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<p class="muted">No tokens yet.</p>{{end}}
+  <form method="POST" action="/feeds/{{.Feed.ID}}/tokens"><button type="submit">Generate new token</button></form>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Episodes</h3>
+  {{if not .Episodes}}<p class="muted">Nothing archived yet.</p>{{end}}
+  <table>
+    {{range .Episodes}}
+    <tr>
+      <td>{{.Title}}</td>
+      <td class="muted">{{if .Downloaded}}{{.FileBytesFmt}}{{else}}queued{{end}}</td>
+    </tr>
+    {{end}}
+  </table>
+</div>
+{{end}}
