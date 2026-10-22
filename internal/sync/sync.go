@@ -15,6 +15,7 @@ type Service struct {
 	engine   *archive.Engine
 	interval time.Duration
 	syncing  chan struct{}
+	manual   chan *store.Feed
 }
 
 func NewService(db *store.DB, engine *archive.Engine, interval time.Duration) *Service {
@@ -23,10 +24,23 @@ func NewService(db *store.DB, engine *archive.Engine, interval time.Duration) *S
 		engine:   engine,
 		interval: interval,
 		syncing:  make(chan struct{}, 1),
+		manual:   make(chan *store.Feed, 32),
 	}
 }
 
-// Run blocks until ctx is cancelled, checking for due feeds on a ticker.
+// QueueFeedAsync queues a manual sync request for a feed. It returns
+// immediately; the sync worker picks the request up asynchronously.
+func (s *Service) QueueFeedAsync(feed *store.Feed) {
+	select {
+	case s.manual <- feed:
+	default:
+		// queue full: a sync for this feed is already pending upstream in
+		// the queue; drop the duplicate rather than blocking the request.
+	}
+}
+
+// Run blocks until ctx is cancelled, checking for due feeds on a ticker
+// and processing queued manual sync requests.
 func (s *Service) Run(ctx context.Context) {
 	s.SyncDue(ctx)
 	t := time.NewTicker(time.Minute)
@@ -37,6 +51,10 @@ func (s *Service) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			s.SyncDue(ctx)
+		case feed := <-s.manual:
+			if err := s.engine.SyncFeed(ctx, feed); err != nil {
+				slog.Warn("manual sync failed", "feed", feed.Title, "err", err)
+			}
 		}
 	}
 }

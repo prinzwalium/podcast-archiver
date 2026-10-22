@@ -4,7 +4,8 @@
   <p class="muted">{{.Feed.SourceURL}}</p>
   <p>{{.Stats.TotalEpisodes}} episodes · {{.Stats.Downloaded}} downloaded · {{.Stats.DownloadedBytesFmt}} on disk · {{.Stats.TotalBytesFmt}} total predicted</p>
   {{if .Feed.LastError}}<p style="color:var(--danger)">Last sync error: {{.Feed.LastError}}</p>{{end}}
-  <form class="inline" method="POST" action="/feeds/{{.Feed.ID}}/sync"><button type="submit">Sync now</button></form>
+  <form class="inline" method="POST" action="/feeds/{{.Feed.ID}}/sync"><button type="submit" title="Queues a background sync">Sync now</button></form>
+  <p class="muted" style="margin:0.3rem 0 0">Sync now queues a background sync — watch the <a href="/feeds/{{.Feed.ID}}/events">activity log</a> or refresh this page for progress.</p>
   <form class="inline" method="POST" action="/feeds/{{.Feed.ID}}/delete" onsubmit="return confirm('Delete archive and metadata? Files shared with other feeds are kept.')"><button class="danger" type="submit">Delete archive</button></form>
 </div>
 

@@ -12,6 +12,7 @@ import (
 	"github.com/prinzwalium/podcast-archiver/internal/auth"
 	"github.com/prinzwalium/podcast-archiver/internal/config"
 	"github.com/prinzwalium/podcast-archiver/internal/store"
+	"github.com/prinzwalium/podcast-archiver/internal/sync"
 )
 
 type Handler struct {
@@ -19,10 +20,11 @@ type Handler struct {
 	engine *archive.Engine
 	cfg    *config.Config
 	auth   *auth.Service
+	syncer *sync.Service
 }
 
-func New(db *store.DB, engine *archive.Engine, cfg *config.Config, authSvc *auth.Service) *Handler {
-	return &Handler{db: db, engine: engine, cfg: cfg, auth: authSvc}
+func New(db *store.DB, engine *archive.Engine, cfg *config.Config, authSvc *auth.Service, syncer *sync.Service) *Handler {
+	return &Handler{db: db, engine: engine, cfg: cfg, auth: authSvc, syncer: syncer}
 }
 
 func (h *Handler) mediaRoot() string {
@@ -234,9 +236,9 @@ func (h *Handler) syncFeed(w http.ResponseWriter, r *http.Request, u *store.User
 		http.NotFound(w, r)
 		return
 	}
-	if err := h.engine.SyncFeed(r.Context(), feed); err != nil {
-		slog.Warn("manual sync failed", "feed", feed.Title, "err", err)
-	}
+	// Queue the sync; it runs on the sync worker, not in this request, so
+	// the page returns immediately instead of blocking on a big download.
+	h.syncer.QueueFeedAsync(feed)
 	http.Redirect(w, r, "/feeds/"+strconv.FormatInt(feed.ID, 10), http.StatusFound)
 }
 

@@ -42,9 +42,12 @@ func main() {
 	syncer := sync.NewService(db, engine, cfg.SyncInterval)
 	go syncer.Run(context.Background())
 
+	// Reuse the sync service's queue for manual "Sync now" requests so they
+	// don't run inside the HTTP request.
+
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           httpd.New(db, engine, cfg, auth.New(cfg)).Handler(),
+		Handler:           httpd.New(db, engine, cfg, auth.New(cfg), syncer).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
