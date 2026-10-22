@@ -1,0 +1,38 @@
+{{define "content-admin"}}{{template "head" .}}
+<div class="card">
+  <h2 style="margin-top:0">Administration</h2>
+  <p class="muted">Admin rights are granted via the OIDC group configured in <code>PA_OIDC_ADMIN_GROUPS</code>.</p>
+  <p class="muted">Total deduplicated storage: <strong>{{.StorageUsed}}</strong></p>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Users</h3>
+  <table>
+    <tr><th>Name</th><th>Subject</th><th>Role</th><th>Quota</th><th>Used</th><th></th></tr>
+    {{range .Users}}
+    <tr>
+      <td>{{.Name}}</td>
+      <td class="muted">{{.Sub}}</td>
+      <td>{{if .IsAdmin}}admin{{else}}user{{end}}</td>
+      <td>
+        <form class="inline" method="POST" action="/admin/users/{{.ID}}/update">
+          <input type="number" name="max_feeds" min="0" value="{{.MaxFeeds}}" title="Max feeds (0 = unlimited)" style="width:5rem;padding:0.3rem;border:1px solid var(--border);border-radius:6px">
+          <input type="number" name="max_bytes" min="0" value="{{.MaxBytes}}" title="Max bytes (0 = unlimited)" style="width:9rem;padding:0.3rem;border:1px solid var(--border);border-radius:6px">
+          <button type="submit">Save</button>
+        </form>
+        <span class="muted">({{.MaxBytesFmt}})</span>
+      </td>
+      <td class="muted">{{.UsedFmt}}</td>
+      <td>
+        {{if not .IsAdmin}}
+        <form class="inline" method="POST" action="/admin/users/{{.ID}}/delete" onsubmit="return confirm('Delete this user and all their archives?')">
+          <button class="danger" type="submit">Delete</button>
+        </form>
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  <p class="muted">Quota fields: max feeds (0 = unlimited), max bytes (0 = unlimited, e.g. 107374182400 for 100 GiB). Files shared with other users are kept.</p>
+</div>
+{{template "foot" .}}{{end}}

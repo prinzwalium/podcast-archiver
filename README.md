@@ -36,13 +36,29 @@ Or with `compose.yaml` (see the file for all options): `docker compose up -d`.
 | `PA_OIDC_ISSUER` | — (unset = single-user mode) | Authentik provider URL, e.g. `https://auth.example.com/application/o/podcast-archiver/` |
 | `PA_OIDC_CLIENT_ID` / `PA_OIDC_CLIENT_SECRET` | — | OIDC client credentials (required when issuer is set) |
 | `PA_OIDC_REDIRECT_URL` | `<external>/auth/callback` | Override if your proxy path differs |
+| `PA_OIDC_ALLOWED_GROUPS` | — (all users) | Comma-separated group allowlist; users outside these groups are denied login |
+| `PA_OIDC_ADMIN_GROUPS` | — (no admins) | Comma-separated groups whose members get admin rights |
+| `PA_MAX_STORAGE_BYTES` | — (unlimited) | Global disk budget; downloads pause (with a sync event) when exceeded |
+| `PA_USER_MAX_BYTES` | — (unlimited) | Default per-user quota; admins can override per user |
 
 ### Authentik setup
 
 1. Create an application + provider of type *Explicit/Hybrid* in Authentik with signing key RS256.
 2. Redirect URI: `https://your-archiver-host/auth/callback`.
-3. Scopes: `openid`, `profile`, `email`.
-4. Copy the client ID/secret into the environment variables above.
+3. Scopes: `openid`, `profile`, `email` — plus a custom property mapping that exposes group memberships, e.g. a scope mapping with expression `return ["groups"]` and the *Group* claim enabled (Authentik's default `offline_access`/profile mappings already include `groups` when the "User info" scope mode is used; verify with a test login).
+4. Create Authentik groups (e.g. `podcast-users`, `podcast-admins`) and assign users.
+5. Set `PA_OIDC_ALLOWED_GROUPS=podcast-users` and `PA_OIDC_ADMIN_GROUPS=podcast-admins`.
+6. Copy the client ID/secret into the environment variables above.
+
+Users outside the allowed groups get a 403 at login. Admin rights sync from the `groups` claim on every login: leaving the admin group in Authentik revokes admin on next sign-in.
+
+### Admin section
+
+Members of the admin group see an **Admin** link in the header. There they can:
+
+- view all users and their deduplicated storage usage,
+- set per-user quotas (max feeds / max bytes; 0 = unlimited),
+- delete users and their archives (shared, deduplicated files are kept).
 
 Feed URLs for podcast apps use tokens instead of OIDC: open a feed in the web UI and generate a token. Anyone with the token can read that one feed; revoke it anytime.
 

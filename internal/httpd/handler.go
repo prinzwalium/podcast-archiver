@@ -1,6 +1,7 @@
 package httpd
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -39,6 +40,14 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /feeds", h.requireUser(h.addFeed))
 	mux.HandleFunc("POST /feeds/{id}/delete", h.requireUser(h.deleteFeed))
 	mux.HandleFunc("POST /feeds/{id}/settings", h.requireUser(h.updateSettings))
+	mux.HandleFunc("POST /feeds/{id}/episodes/{guid}/pin", h.requireUser(h.pinEpisode))
+	mux.HandleFunc("POST /feeds/{id}/episodes/{guid}/unpin", h.requireUser(h.unpinEpisode))
+	mux.HandleFunc("GET /export/opml", h.requireUser(h.exportOPML))
+	mux.HandleFunc("POST /import/opml", h.requireUser(h.importOPML))
+	mux.HandleFunc("GET /feeds/{id}/events", h.requireUser(h.pageEvents))
+	mux.HandleFunc("GET /admin", h.requireAdmin(h.pageAdmin))
+	mux.HandleFunc("POST /admin/users/{id}/update", h.requireAdmin(h.updateUser))
+	mux.HandleFunc("POST /admin/users/{id}/delete", h.requireAdmin(h.deleteUser))
 	mux.HandleFunc("POST /feeds/{id}/sync", h.requireUser(h.syncFeed))
 	mux.HandleFunc("POST /feeds/{id}/tokens", h.requireUser(h.createToken))
 	mux.HandleFunc("POST /feeds/{id}/tokens/{token}/delete", h.requireUser(h.deleteToken))
@@ -93,6 +102,10 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 	user, err := h.auth.Callback(w, r, h.db)
 	if err != nil {
 		slog.Warn("oidc callback failed", "err", err)
+		if errors.Is(err, auth.ErrGroupNotAllowed) {
+			http.Error(w, "access denied: you are not in an allowed group", http.StatusForbidden)
+			return
+		}
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
 		return
 	}
@@ -197,7 +210,14 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request, u *stor
 	}
 	syncMode := sanitizeMode(r.FormValue("sync_mode"), []string{"mirror", "archive"}, feed.SyncMode)
 	reuploadMode := sanitizeMode(r.FormValue("reupload_mode"), []string{"replace", "keep"}, feed.ReuploadMode)
-	if err := h.db.UpdateFeedSettings(feed.ID, syncMode, reuploadMode); err != nil {
+	refreshSecs, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("refresh_secs")), 10, 64)
+	if err != nil || refreshSecs < 0 {
+		refreshSecs = feed.RefreshSecs
+	}
+	if refreshSecs > 0 && refreshSecs < 60 {
+		refreshSecs = 60 // floor: don't hammer small creators' servers
+	}
+	if err := h.db.UpdateFeedSettings(feed.ID, syncMode, reuploadMode, refreshSecs); err != nil {
 		http.Error(w, "update failed", http.StatusInternalServerError)
 		return
 	}
@@ -262,5 +282,5 @@ func (h *Handler) predict(w http.ResponseWriter, r *http.Request, u *store.User)
 		http.Error(w, "could not fetch feed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	h.renderPredictResult(w, pred, rawURL)
+	h.renderPredictResult(w, u, pred, rawURL)
 }

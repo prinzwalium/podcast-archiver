@@ -1,0 +1,16 @@
+{{define "content-events"}}{{template "head" .}}
+<div class="card">
+  <h2 style="margin-top:0">Sync activity · {{.Feed.Title}}</h2>
+  <p><a href="/feeds/{{.Feed.ID}}">← back to feed</a></p>
+  {{if not .Events}}<p class="muted">No events recorded yet.</p>{{end}}
+  <table>
+    {{range .Events}}
+    <tr>
+      <td class="muted">{{.TimeFmt}}</td>
+      <td>{{.Kind}}</td>
+      <td>{{.Detail}}</td>
+    </tr>
+    {{end}}
+  </table>
+</div>{{template "foot" .}}
+{{end}}

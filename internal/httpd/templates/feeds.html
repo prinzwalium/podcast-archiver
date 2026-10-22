@@ -1,4 +1,4 @@
-{{define "content"}}
+{{define "content-feeds"}}{{template "head" .}}
 <div class="card">
   <h2 style="margin-top:0">Add a podcast feed</h2>
   <form method="POST" action="/feeds">
@@ -30,7 +30,32 @@
   </table>
 </div>
 
-<div class="card">
-  <p class="muted">Total storage used by downloaded episodes: <strong>{{.StorageUsed}}</strong></p>
+{{if .FailingFeeds}}
+<div class="card" style="border-color:var(--danger)">
+  <h3 style="margin-top:0;color:var(--danger)">⚠ Feeds with sync failures</h3>
+  <table>
+    {{range .FailingFeeds}}
+    <tr>
+      <td><a href="/feeds/{{.ID}}">{{.Title}}</a></td>
+      <td class="muted">{{.FailCount}} consecutive failures</td>
+      <td class="muted">{{.LastError}}</td>
+    </tr>
+    {{end}}
+  </table>
 </div>
+{{end}}
+
+<div class="card">
+  <h3 style="margin-top:0">Import / Export</h3>
+  <p class="muted">Bulk-add subscriptions from another podcast app (OPML), or take your list elsewhere.</p>
+  <form method="POST" action="/import/opml" enctype="multipart/form-data" style="display:flex;gap:0.5rem;align-items:center">
+    <input type="file" name="opml" accept=".opml,.xml" required>
+    <button type="submit">Import OPML</button>
+  </form>
+  <a class="btn" href="/export/opml">Export OPML</a>
+</div>
+
+<div class="card">
+  <p class="muted">Total storage used (deduplicated): <strong>{{.StorageUsed}}</strong></p>
+</div>{{template "foot" .}}
 {{end}}
