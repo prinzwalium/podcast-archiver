@@ -85,7 +85,9 @@ func (f *Fetcher) FetchFeed(ctx context.Context, rawURL string) (*gofeed.Feed, e
 	if err := ValidateURL(rawURL); err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Big feeds take a while to transfer; the timeout covers DNS + connect +
+	// full body download.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -101,9 +103,16 @@ func (f *Fetcher) FetchFeed(ctx context.Context, rawURL string) (*gofeed.Feed, e
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("feed fetch: status %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	// Large archives legitimately have very big feeds (100+ MB with full
+	// back-catalogs); cap at a generous 256 MB and surface a clear error
+	// when exceeded instead of a confusing truncated-XML parse error.
+	const maxFeedBytes = 256 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFeedBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(body)) > maxFeedBytes {
+		return nil, fmt.Errorf("feed exceeds maximum size of %d MB", maxFeedBytes>>20)
 	}
 	return gofeed.NewParser().ParseString(string(body))
 }
