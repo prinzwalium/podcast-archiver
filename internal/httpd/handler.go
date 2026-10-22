@@ -1,6 +1,7 @@
 package httpd
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -164,9 +165,11 @@ func (h *Handler) addFeed(w http.ResponseWriter, r *http.Request, u *store.User)
 		http.Error(w, "could not add feed (duplicate?)", http.StatusConflict)
 		return
 	}
-	// Initial sync in background so the request returns fast.
+	// Initial sync in background so the request returns fast. Use a fresh
+	// context: the request's context is canceled as soon as the redirect
+	// is written, which would abort the sync mid-download.
 	go func() {
-		if err := h.engine.SyncFeed(r.Context(), feed); err != nil {
+		if err := h.engine.SyncFeed(context.Background(), feed); err != nil {
 			slog.Warn("initial sync failed", "feed", rawURL, "err", err)
 		}
 	}()
