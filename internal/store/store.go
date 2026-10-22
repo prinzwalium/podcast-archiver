@@ -41,7 +41,10 @@ func migrate(db *sql.DB) error {
 			id INTEGER PRIMARY KEY,
 			sub TEXT NOT NULL UNIQUE,
 			name TEXT NOT NULL DEFAULT '',
-			created_at INTEGER NOT NULL
+			created_at INTEGER NOT NULL,
+			max_feeds INTEGER NOT NULL DEFAULT 0,
+			max_bytes INTEGER NOT NULL DEFAULT 0,
+			is_admin INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS feeds (
 			id INTEGER PRIMARY KEY,
@@ -56,6 +59,8 @@ func migrate(db *sql.DB) error {
 			created_at INTEGER NOT NULL,
 			last_sync INTEGER NOT NULL DEFAULT 0,
 			last_error TEXT NOT NULL DEFAULT '',
+			refresh_secs INTEGER NOT NULL DEFAULT 0,
+			fail_count INTEGER NOT NULL DEFAULT 0,
 			CONSTRAINT uq_user_feed UNIQUE (user_id, source_url)
 		)`,
 		`CREATE TABLE IF NOT EXISTS episodes (
@@ -72,6 +77,7 @@ func migrate(db *sql.DB) error {
 			image_url TEXT NOT NULL DEFAULT '',
 			file_sha TEXT NOT NULL DEFAULT '',
 			downloaded INTEGER NOT NULL DEFAULT 0,
+			pinned INTEGER NOT NULL DEFAULT 0,
 			CONSTRAINT uq_feed_guid UNIQUE (feed_id, guid)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_episodes_feed ON episodes(feed_id, published DESC)`,
@@ -88,6 +94,14 @@ func migrate(db *sql.DB) error {
 			token TEXT NOT NULL UNIQUE,
 			created_at INTEGER NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS events (
+			id INTEGER PRIMARY KEY,
+			feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
+			kind TEXT NOT NULL,
+			detail TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_feed ON events(feed_id, id DESC)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
@@ -100,6 +114,12 @@ func migrate(db *sql.DB) error {
 		{"feeds", "reupload_mode", "ALTER TABLE feeds ADD COLUMN reupload_mode TEXT NOT NULL DEFAULT 'replace'"},
 		{"episodes", "file_sha", "ALTER TABLE episodes ADD COLUMN file_sha TEXT NOT NULL DEFAULT ''"},
 		{"files", "refcount", "ALTER TABLE files ADD COLUMN refcount INTEGER NOT NULL DEFAULT 1"},
+		{"feeds", "refresh_secs", "ALTER TABLE feeds ADD COLUMN refresh_secs INTEGER NOT NULL DEFAULT 0"},
+		{"feeds", "fail_count", "ALTER TABLE feeds ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0"},
+		{"episodes", "pinned", "ALTER TABLE episodes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"},
+		{"users", "max_feeds", "ALTER TABLE users ADD COLUMN max_feeds INTEGER NOT NULL DEFAULT 0"},
+		{"users", "max_bytes", "ALTER TABLE users ADD COLUMN max_bytes INTEGER NOT NULL DEFAULT 0"},
+		{"users", "is_admin", "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, a := range additive {
 		var ck string

@@ -123,18 +123,52 @@ func (s *Service) Callback(w http.ResponseWriter, r *http.Request, db *store.DB)
 	}
 
 	var claims struct {
-		Sub   string `json:"sub"`
-		Name  string `json:"name"`
-		Email string `json:"email"`
+		Sub    string   `json:"sub"`
+		Name   string   `json:"name"`
+		Email  string   `json:"email"`
+		Groups []string `json:"groups"`
 	}
 	if err := idTok.Claims(&claims); err != nil {
 		return nil, err
 	}
+
+	// Group allowlist: when configured, only members of an allowed group
+	// may use the application.
+	if allowed := s.cfg.AllowedGroups(); len(allowed) > 0 {
+		if !hasGroup(claims.Groups, allowed) {
+			return nil, ErrGroupNotAllowed
+		}
+	}
+
 	name := claims.Name
 	if name == "" {
 		name = claims.Email
 	}
-	return db.UpsertUser(claims.Sub, name)
+	u, err := db.UpsertUser(claims.Sub, name)
+	if err != nil {
+		return nil, err
+	}
+	// Admin status derives from OIDC groups; persist it so the UI can show it.
+	isAdmin := hasGroup(claims.Groups, s.cfg.AdminGroups())
+	if err := db.SetUserAdmin(u.ID, isAdmin); err != nil {
+		return nil, err
+	}
+	u.IsAdmin = isAdmin
+	return u, nil
+}
+
+var ErrGroupNotAllowed = errors.New("user is not in an allowed group")
+
+func hasGroup(userGroups []string, want map[string]bool) bool {
+	if len(want) == 0 {
+		return false
+	}
+	for _, g := range userGroups {
+		if want[g] {
+			return true
+		}
+	}
+	return false
 }
 
 // SetSessionCookie issues a signed session cookie for the user.
@@ -190,3 +224,5 @@ func (s *Service) Logout(w http.ResponseWriter) {
 func isSecure(cfg *config.Config) bool {
 	return strings.HasPrefix(cfg.ExternalURL, "https://")
 }
+
+// hasGroup reports whether any of the user's groups is in the want set.

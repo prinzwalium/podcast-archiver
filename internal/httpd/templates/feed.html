@@ -1,4 +1,4 @@
-{{define "content"}}
+{{define "content-feed"}}{{template "head" .}}
 <div class="card">
   <h2 style="margin-top:0">{{.Feed.Title}}</h2>
   <p class="muted">{{.Feed.SourceURL}}</p>
@@ -18,6 +18,9 @@
     <p>
       <label><input type="radio" name="reupload_mode" value="replace" {{if not .Feed.KeepsReupload}}checked{{end}}> Replace re-uploads — if the creator uploads a corrected file, download the new version</label><br>
       <label><input type="radio" name="reupload_mode" value="keep" {{if .Feed.KeepsReupload}}checked{{end}}> Keep local copy — never re-download, even if the file changes upstream</label>
+    </p>
+    <p>
+      <label>Refresh interval (seconds, 0 = server default): <input type="number" name="refresh_secs" min="0" step="60" value="{{.Feed.RefreshSecs}}" style="width:10rem;padding:0.3rem;border:1px solid var(--border);border-radius:6px"></label>
     </p>
     <button type="submit">Save settings</button>
   </form>
@@ -41,14 +44,22 @@
 
 <div class="card">
   <h3 style="margin-top:0">Episodes</h3>
+  <p class="muted">Pinned episodes survive mirror deletions. <a href="/feeds/{{.Feed.ID}}/events">Sync activity log →</a></p>
   {{if not .Episodes}}<p class="muted">Nothing archived yet.</p>{{end}}
   <table>
     {{range .Episodes}}
     <tr>
-      <td>{{.Title}}</td>
+      <td>{{.Title}} {{if .Pinned}}<span title="pinned">📌</span>{{end}}</td>
       <td class="muted">{{if .Downloaded}}{{.FileBytesFmt}}{{else}}queued{{end}}</td>
+      <td>
+        {{if .Pinned}}
+        <form class="inline" method="POST" action="/feeds/{{$.Feed.ID}}/episodes/{{.GUID}}/unpin"><button type="submit" title="Unpin">Unpin</button></form>
+        {{else}}
+        <form class="inline" method="POST" action="/feeds/{{$.Feed.ID}}/episodes/{{.GUID}}/pin"><button type="submit" title="Pin — protect from mirror deletion">Pin</button></form>
+        {{end}}
+      </td>
     </tr>
     {{end}}
   </table>
-</div>
+</div>{{template "foot" .}}
 {{end}}

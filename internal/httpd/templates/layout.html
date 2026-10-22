@@ -1,4 +1,4 @@
-{{define "layout"}}<!DOCTYPE html>
+{{define "head"}}<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -28,11 +28,15 @@ form.inline { display:inline; }
   <a href="/">📼 Podcast Archiver</a>
   <div>
     <span class="muted">{{if .UserName}}{{.UserName}}{{end}}</span>
+    {{if .IsAdmin}}<a href="/admin" class="btn" style="color:var(--accent);text-decoration:none">Admin</a>{{end}}
     {{if .AuthEnabled}}<form class="inline" method="POST" action="/auth/logout"><button type="submit">Logout</button></form>{{end}}
   </div>
 </header>
 <main>
-{{template "content" .}}
+{{end}}
+
+{{define "foot"}}
 </main>
 </body>
-</html>{{end}}
+</html>
+{{end}}

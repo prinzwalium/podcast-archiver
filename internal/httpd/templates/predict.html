@@ -1,4 +1,4 @@
-{{define "content"}}
+{{define "content-predict"}}{{template "head" .}}
 <div class="card">
   <h2 style="margin-top:0">Predict archive size</h2>
   <form method="POST" action="/predict" style="display:flex;gap:0.5rem">
@@ -17,5 +17,5 @@
     </form>
   </div>
   {{end}}
-</div>
+</div>{{template "foot" .}}
 {{end}}

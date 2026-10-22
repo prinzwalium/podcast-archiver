@@ -2,6 +2,7 @@ package archive
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -27,6 +28,42 @@ func NewEngine(db *store.DB, fetcher *Fetcher, cfg *config.Config) *Engine {
 }
 
 var unsafeFilename = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
+
+var ErrBudgetExceeded = errors.New("storage budget exceeded")
+
+// budgetAllows checks the global storage cap and the per-user quota before
+// downloading an episode of the given size.
+func (e *Engine) budgetAllows(userID int64, episodeBytes int64) error {
+	if e.cfg.MaxStorageBytes > 0 {
+		used, err := e.db.StorageUsed()
+		if err != nil {
+			return err
+		}
+		if used+episodeBytes > e.cfg.MaxStorageBytes {
+			return fmt.Errorf("%w: global", ErrBudgetExceeded)
+		}
+	}
+	if e.cfg.DefaultUserMaxBytes > 0 || true {
+		user, err := e.db.GetUserByID(userID)
+		if err != nil {
+			return err
+		}
+		quota := user.MaxBytes
+		if quota == 0 {
+			quota = e.cfg.DefaultUserMaxBytes
+		}
+		if quota > 0 {
+			used, err := e.db.UserStorageBytes(userID)
+			if err != nil {
+				return err
+			}
+			if used+episodeBytes > quota {
+				return fmt.Errorf("%w: user quota", ErrBudgetExceeded)
+			}
+		}
+	}
+	return nil
+}
 
 // ContentDir returns the root directory for content-addressed media files.
 func (e *Engine) ContentDir() string {
@@ -86,36 +123,51 @@ func (e *Engine) SyncFeed(ctx context.Context, feed *store.Feed) error {
 			DurationSecs:   itunesDuration(item),
 			ImageURL:       itemImage(item),
 		}
-		enclosureChanged, err := e.db.UpsertEpisode(ep)
+		isNew, enclosureChanged, err := e.db.UpsertEpisode(ep)
 		if err != nil {
 			slog.Warn("upsert episode failed", "feed", feed.ID, "guid", guid, "err", err)
 			continue
 		}
-		// Reupload handling: if the enclosure URL changed and the policy is
-		// "replace", clear the local file so it is re-downloaded. With "keep"
-		// the local copy is retained as-is.
-		if enclosureChanged && feed.KeepsReupload() {
-			slog.Info("enclosure changed, keeping local copy (reupload=keep)", "feed", feed.Title, "guid", guid)
+		if isNew {
+			_ = e.db.AddEvent(feed.ID, "episode_added", ep.Title)
+		} else if enclosureChanged {
+			// Re-upload detected. "replace" clears the local file so the new
+			// version is downloaded; "keep" retains the local copy as-is.
+			if feed.KeepsReupload() {
+				slog.Info("enclosure changed, keeping local copy (reupload=keep)", "feed", feed.Title, "guid", guid)
+			} else if err := e.db.ClearEpisodeFile(feed.ID, guid); err != nil {
+				slog.Warn("clear episode file failed", "feed", feed.ID, "guid", guid, "err", err)
+			} else {
+				_ = e.db.AddEvent(feed.ID, "episode_replaced", ep.Title)
+			}
 		}
 	}
 
-	// Mirror mode: delete local episodes the source removed.
+	// Mirror mode: delete local episodes the source removed (pins survive).
 	if feed.IsMirror() {
-		shas, err := e.db.DeleteMissing(feed.ID, guids)
+		removed, shas, err := e.db.DeleteMissing(feed.ID, guids)
 		if err != nil {
 			return err
+		}
+		for _, guid := range removed {
+			_ = e.db.AddEvent(feed.ID, "episode_removed", guid)
 		}
 		for _, sha := range shas {
 			e.unrefFile(sha)
 		}
 	}
 
-	// Download pending episodes (oldest first).
+	// Download pending episodes (oldest first), respecting storage budgets.
 	pending, err := e.db.UndownloadedEpisodes(feed.ID)
 	if err != nil {
 		return err
 	}
 	for _, ep := range pending {
+		if err := e.budgetAllows(feed.UserID, ep.EnclosureBytes); err != nil {
+			slog.Warn("skipping download, storage budget exceeded", "feed", feed.ID, "guid", ep.GUID, "err", err)
+			_ = e.db.AddEvent(feed.ID, "budget_skipped", ep.Title)
+			continue
+		}
 		if err := e.downloadEpisode(ctx, feed, ep); err != nil {
 			slog.Warn("episode download failed", "feed", feed.ID, "guid", ep.GUID, "err", err)
 		}
@@ -124,8 +176,10 @@ func (e *Engine) SyncFeed(ctx context.Context, feed *store.Feed) error {
 	return e.db.UpdateFeedSync(feed.ID, time.Now().Unix(), "")
 }
 
-// unrefFile decrements a file's refcount and removes it from disk when it
-// drops to zero.
+// UnrefFile decrements a file's refcount and removes it from disk when it
+// drops to zero. Exported for admin operations.
+func (e *Engine) UnrefFile(sha string) { e.unrefFile(sha) }
+
 func (e *Engine) unrefFile(sha string) {
 	remove, err := e.db.FileUnref(sha)
 	if err != nil {
