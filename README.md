@@ -32,7 +32,8 @@ Or with `compose.yaml` (see the file for all options): `docker compose up -d`.
 | `PA_LISTEN_ADDR` | `:8080` | Listen address |
 | `PUID` / `PGID` | `1000` / `1000` | Run the process as this UID/GID (Unraid convention; match your `/data` share ownership) |
 | `UMASK` | `022` | File permission mask applied to downloaded files and the database |
-| `PA_DATA_DIR` | `/data` (in container) | Database + downloaded media |
+| `PA_DATA_DIR` | `/data` (in container) | Database and application data | 
+| `PA_MEDIA_DIR` | `<PA_DATA_DIR>/media` | Downloaded episode files — point this at a separate bind mount to keep the (large) media archive off your DB volume |
 | `PA_SYNC_INTERVAL` | `6h` | Feed refresh interval (min `1m`) |
 | `PA_MAX_EPISODE_BYTES` | `1073741824` | Hard size cap per episode file |
 | `PA_OIDC_ISSUER` | — (unset = single-user mode) | Authentik provider URL, e.g. `https://auth.example.com/application/o/podcast-archiver/` |

@@ -67,7 +67,7 @@ func (e *Engine) budgetAllows(userID int64, episodeBytes int64) error {
 
 // ContentDir returns the root directory for content-addressed media files.
 func (e *Engine) ContentDir() string {
-	return filepath.Join(e.cfg.DataDir, "media", "objects")
+	return filepath.Join(e.cfg.MediaDir, "objects")
 }
 
 // objectPath maps a SHA-256 to its on-disk path (sharded to avoid huge dirs).
