@@ -3,6 +3,7 @@ package httpd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -55,6 +56,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /feeds/{id}/tokens", h.requireUser(h.createToken))
 	mux.HandleFunc("POST /feeds/{id}/tokens/{token}/delete", h.requireUser(h.deleteToken))
 	mux.HandleFunc("GET /feeds/{id}", h.requireUser(h.pageFeedDetail))
+	mux.HandleFunc("GET /feeds/{id}/syncing", h.requireUser(h.feedSyncingStatus))
 	mux.HandleFunc("GET /predict", h.requireUser(h.pagePredict))
 	mux.HandleFunc("POST /predict", h.requireUser(h.predict))
 	mux.HandleFunc("GET /auth/login", h.auth.Login)
@@ -70,7 +72,7 @@ func (h *Handler) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; frame-ancestors 'none'")
+			"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' https: data:; connect-src 'self'; frame-ancestors 'none'")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -227,6 +229,22 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request, u *stor
 		return
 	}
 	http.Redirect(w, r, "/feeds/"+strconv.FormatInt(feed.ID, 10), http.StatusFound)
+}
+
+// feedSyncingStatus reports whether a sync is currently running for a feed,
+// as JSON for the UI's polling badge.
+func (h *Handler) feedSyncingStatus(w http.ResponseWriter, r *http.Request, u *store.User) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if _, err := h.db.GetFeed(u.ID, id); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"syncing":%t}`, h.syncer.IsSyncing(id))
 }
 
 func (h *Handler) syncFeed(w http.ResponseWriter, r *http.Request, u *store.User) {

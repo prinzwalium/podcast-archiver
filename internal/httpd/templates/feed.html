@@ -1,6 +1,6 @@
 {{define "content-feed"}}{{template "head" .}}
 <div class="card">
-  <h2 style="margin-top:0">{{.Feed.Title}}</h2>
+  <h2 style="margin-top:0">{{.Feed.Title}} <span id="sync-badge" style="display:none;font-size:0.7rem;background:#dbeafe;color:#1d4ed8;border-radius:99px;padding:0.15rem 0.6rem;vertical-align:middle">⏳ syncing…</span></h2>
   <p class="muted">{{.Feed.SourceURL}}</p>
   <p>{{.Stats.TotalEpisodes}} episodes · {{.Stats.Downloaded}} downloaded · {{.Stats.DownloadedBytesFmt}} on disk · {{.Stats.TotalBytesFmt}} total predicted</p>
   {{if .Feed.LastError}}<p style="color:var(--danger)">Last sync error: {{.Feed.LastError}}</p>{{end}}
@@ -62,5 +62,23 @@
     </tr>
     {{end}}
   </table>
-</div>{{template "foot" .}}
+</div>
+<script>
+(function() {
+  var badge = document.getElementById('sync-badge');
+  if (!badge) return;
+  function poll() {
+    fetch('/feeds/{{.Feed.ID}}/syncing', {cache: 'no-store'})
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(d) {
+        if (!d) return;
+        badge.style.display = d.syncing ? 'inline-block' : 'none';
+      })
+      .catch(function() {});
+  }
+  poll();
+  setInterval(poll, 3000);
+})();
+</script>
+{{template "foot" .}}
 {{end}}

@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"log/slog"
+	stdsync "sync"
 	"time"
 
 	"github.com/prinzwalium/podcast-archiver/internal/archive"
@@ -16,6 +17,9 @@ type Service struct {
 	interval time.Duration
 	syncing  chan struct{}
 	manual   chan *store.Feed
+
+	mu      stdsync.Mutex
+	running map[int64]bool // feed IDs currently being synced
 }
 
 func NewService(db *store.DB, engine *archive.Engine, interval time.Duration) *Service {
@@ -25,6 +29,33 @@ func NewService(db *store.DB, engine *archive.Engine, interval time.Duration) *S
 		interval: interval,
 		syncing:  make(chan struct{}, 1),
 		manual:   make(chan *store.Feed, 32),
+		running:  map[int64]bool{},
+	}
+}
+
+// IsSyncing reports whether a sync is currently running for the feed.
+func (s *Service) IsSyncing(feedID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running[feedID]
+}
+
+func (s *Service) setSyncing(feedID int64, on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if on {
+		s.running[feedID] = true
+	} else {
+		delete(s.running, feedID)
+	}
+}
+
+// syncFeed runs a single feed sync with running-state tracking.
+func (s *Service) syncFeed(ctx context.Context, feed *store.Feed) {
+	s.setSyncing(feed.ID, true)
+	defer s.setSyncing(feed.ID, false)
+	if err := s.engine.SyncFeed(ctx, feed); err != nil {
+		slog.Warn("sync failed", "feed", feed.Title, "err", err)
 	}
 }
 
@@ -52,9 +83,7 @@ func (s *Service) Run(ctx context.Context) {
 		case <-t.C:
 			s.SyncDue(ctx)
 		case feed := <-s.manual:
-			if err := s.engine.SyncFeed(ctx, feed); err != nil {
-				slog.Warn("manual sync failed", "feed", feed.Title, "err", err)
-			}
+			s.syncFeed(ctx, feed)
 		}
 	}
 }
@@ -81,14 +110,11 @@ func (s *Service) SyncDue(ctx context.Context) {
 		if feed.LastSync > 0 && time.Since(time.Unix(feed.LastSync, 0)) < interval {
 			continue
 		}
-		if err := s.engine.SyncFeed(ctx, feed); err != nil {
-			slog.Warn("sync failed", "feed", feed.Title, "err", err)
-		}
+		s.syncFeed(ctx, feed)
 	}
 }
 
-// SyncAll syncs every feed regardless of due time (used by SyncDue for
-// never-synced feeds and available for manual triggers).
+// SyncAll syncs every feed regardless of due time.
 func (s *Service) SyncAll(ctx context.Context) {
 	feeds, err := s.db.ListAllFeeds()
 	if err != nil {
@@ -96,8 +122,6 @@ func (s *Service) SyncAll(ctx context.Context) {
 		return
 	}
 	for _, feed := range feeds {
-		if err := s.engine.SyncFeed(ctx, feed); err != nil {
-			slog.Warn("sync failed", "feed", feed.Title, "err", err)
-		}
+		s.syncFeed(ctx, feed)
 	}
 }
