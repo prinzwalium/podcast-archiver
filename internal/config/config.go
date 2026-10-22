@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ type Config struct {
 	ListenAddr          string
 	ExternalURL         string
 	DataDir             string
+	MediaDir            string // defaults to <DataDir>/media; can be a separate bind mount
 	SecretKey           string // 32+ bytes, signs session cookies
 	SyncInterval        time.Duration
 	MaxEpisodeBytes     int64
@@ -34,6 +36,7 @@ func Load() (*Config, error) {
 		ListenAddr:       getenv("PA_LISTEN_ADDR", ":8080"),
 		ExternalURL:      strings.TrimRight(getenv("PA_EXTERNAL_URL", "http://localhost:8080"), "/"),
 		DataDir:          getenv("PA_DATA_DIR", "./data"),
+		MediaDir:         getenv("PA_MEDIA_DIR", ""),
 		SecretKey:        os.Getenv("PA_SECRET_KEY"),
 		SyncInterval:     6 * time.Hour,
 		MaxEpisodeBytes:  1024 * 1024 * 1024, // 1 GiB per file
@@ -52,6 +55,9 @@ func Load() (*Config, error) {
 		OIDCAdminGroups:   os.Getenv("PA_OIDC_ADMIN_GROUPS"),
 	}
 
+	if cfg.MediaDir == "" {
+		cfg.MediaDir = filepath.Join(cfg.DataDir, "media")
+	}
 	if v := os.Getenv("PA_SYNC_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {

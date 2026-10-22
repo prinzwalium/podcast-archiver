@@ -25,7 +25,7 @@ func New(db *store.DB, engine *archive.Engine, cfg *config.Config, authSvc *auth
 }
 
 func (h *Handler) mediaRoot() string {
-	return strings.TrimSuffix(h.cfg.DataDir, "/") + "/media"
+	return h.cfg.MediaDir
 }
 
 func (h *Handler) Handler() http.Handler {

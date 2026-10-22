@@ -20,8 +20,13 @@ if ! getent passwd "$PUID" >/dev/null 2>&1; then
     adduser -u "$PUID" -G "$PGID" -D -H app >/dev/null 2>&1 || true
 fi
 
-# Ensure the data dir is writable by the runtime user before dropping privileges.
+# Ensure the data and media dirs are writable by the runtime user before
+# dropping privileges. PA_MEDIA_DIR may point at a separate bind mount.
 mkdir -p "$PA_DATA_DIR" 2>/dev/null || true
 chown -R "$PUID:$PGID" "$PA_DATA_DIR" 2>/dev/null || true
+if [ -n "${PA_MEDIA_DIR:-}" ]; then
+    mkdir -p "$PA_MEDIA_DIR" 2>/dev/null || true
+    chown -R "$PUID:$PGID" "$PA_MEDIA_DIR" 2>/dev/null || true
+fi
 
 exec su-exec "$PUID:$PGID" /usr/local/bin/podcast-archiver
