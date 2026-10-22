@@ -4,7 +4,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -57,10 +56,14 @@ func (h *Handler) feedRSS(w http.ResponseWriter, r *http.Request, feed *store.Fe
 
 	var items strings.Builder
 	for _, ep := range episodes {
-		if !ep.Downloaded || ep.FilePath == "" {
+		if !ep.Downloaded || ep.FileSHA == "" {
 			continue
 		}
-		mediaURL := fmt.Sprintf("%s/media/%s/%s", base, token, filepath.Base(ep.FilePath))
+		file, err := h.db.GetFile(ep.FileSHA)
+		if err != nil {
+			continue
+		}
+		mediaURL := fmt.Sprintf("%s/media/%s/%s", base, token, ep.FileSHA+file.Ext)
 		pub := ""
 		if ep.Published > 0 {
 			pub = time.Unix(ep.Published, 0).UTC().Format(time.RFC1123Z)
@@ -71,7 +74,7 @@ func (h *Handler) feedRSS(w http.ResponseWriter, r *http.Request, feed *store.Fe
 			pub,
 			cdata(ep.Description),
 			xmlEscape(mediaURL),
-			ep.FileBytes,
+			file.Size,
 			xmlEscape(ep.MimeType),
 			ep.DurationSecs,
 		))

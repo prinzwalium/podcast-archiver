@@ -1,8 +1,16 @@
 {{define "content"}}
 <div class="card">
   <h2 style="margin-top:0">Add a podcast feed</h2>
-  <form method="POST" action="/feeds" style="display:flex;gap:0.5rem">
-    <input type="url" name="url" placeholder="https://example.com/feed.xml" required>
+  <form method="POST" action="/feeds">
+    <input type="url" name="url" placeholder="https://example.com/feed.xml" required style="width:100%;margin-bottom:0.6rem">
+    <p style="margin:0 0 0.4rem">
+      <label style="margin-right:1.2rem"><input type="radio" name="sync_mode" value="mirror" checked> Mirror (follow source deletions)</label>
+      <label><input type="radio" name="sync_mode" value="archive"> Archive (keep everything)</label>
+    </p>
+    <p style="margin:0 0 0.6rem">
+      <label style="margin-right:1.2rem"><input type="radio" name="reupload_mode" value="replace" checked> Replace re-uploads</label>
+      <label><input type="radio" name="reupload_mode" value="keep"> Keep local copy</label>
+    </p>
     <button type="submit">Add feed</button>
   </form>
   <p class="muted">New feeds start archiving immediately. <a href="/predict">Predict archive size first →</a></p>

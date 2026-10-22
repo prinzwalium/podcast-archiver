@@ -112,7 +112,13 @@ func (h *Handler) pageFeedDetail(w http.ResponseWriter, r *http.Request, u *stor
 	}
 	var views []*episodeView
 	for _, e := range episodes {
-		views = append(views, &episodeView{Title: e.Title, Downloaded: e.Downloaded, FileBytesFmt: fmtBytes(e.FileBytes)})
+		size := int64(0)
+		if e.Downloaded && e.FileSHA != "" {
+			if file, err := h.db.GetFile(e.FileSHA); err == nil {
+				size = file.Size
+			}
+		}
+		views = append(views, &episodeView{Title: e.Title, Downloaded: e.Downloaded, FileBytesFmt: fmtBytes(size)})
 	}
 	h.render(w, http.StatusOK, &pageData{
 		Title:    feed.Title,

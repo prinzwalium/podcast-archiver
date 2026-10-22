@@ -2,7 +2,9 @@
 
 Self-hosted podcast archiver. It mirrors podcast feeds (episodes, artwork, descriptions, chapters stay intact in the original files — nothing is re-encoded), keeps them in sync, and serves each archive as its own podcast RSS feed that you can subscribe to from any podcast app.
 
-- **Mirror mode**: the archive follows the source feed. Episodes removed or re-uploaded by the creator are removed/replaced locally on the next sync.
+- **Per-feed sync mode**: `mirror` follows the source feed (episodes removed by the creator disappear locally), `archive` is immutable (keeps everything). Choose per feed when adding, change anytime.
+- **Re-upload handling** per feed: `replace` re-downloads corrected files when the creator re-uploads, `keep` retains your local copy untouched.
+- **Deduplicated storage**: episode files are stored content-addressed (SHA-256). If the same feed (or same episode) is archived by multiple users, it is stored on disk exactly once.
 - **Per-user archives** via OIDC (Authentik), or single-user local mode without auth.
 - **Podcatcher-compatible feed URLs** with revocable tokens (podcast apps can't do OIDC).
 - **Archive size prediction** before you commit disk space.
