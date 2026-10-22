@@ -38,6 +38,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /{$}", h.requireUser(h.pageFeeds))
 	mux.HandleFunc("POST /feeds", h.requireUser(h.addFeed))
 	mux.HandleFunc("POST /feeds/{id}/delete", h.requireUser(h.deleteFeed))
+	mux.HandleFunc("POST /feeds/{id}/settings", h.requireUser(h.updateSettings))
 	mux.HandleFunc("POST /feeds/{id}/sync", h.requireUser(h.syncFeed))
 	mux.HandleFunc("POST /feeds/{id}/tokens", h.requireUser(h.createToken))
 	mux.HandleFunc("POST /feeds/{id}/tokens/{token}/delete", h.requireUser(h.deleteToken))
@@ -142,7 +143,9 @@ func (h *Handler) addFeed(w http.ResponseWriter, r *http.Request, u *store.User)
 	if err == nil {
 		title = pred.Title
 	}
-	feed, err := h.db.CreateFeed(u.ID, rawURL, title, "", "", "")
+	syncMode := sanitizeMode(r.FormValue("sync_mode"), []string{"mirror", "archive"}, "mirror")
+	reuploadMode := sanitizeMode(r.FormValue("reupload_mode"), []string{"replace", "keep"}, "replace")
+	feed, err := h.db.CreateFeed(u.ID, rawURL, title, "", "", "", syncMode, reuploadMode)
 	if err != nil {
 		slog.Error("create feed", "err", err)
 		http.Error(w, "could not add feed (duplicate?)", http.StatusConflict)
@@ -159,11 +162,46 @@ func (h *Handler) addFeed(w http.ResponseWriter, r *http.Request, u *store.User)
 
 func (h *Handler) deleteFeed(w http.ResponseWriter, r *http.Request, u *store.User) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err := h.db.DeleteFeed(u.ID, id); err != nil {
+	feed, err := h.db.GetFeed(u.ID, id)
+	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
+	if err := h.engine.DeleteFeed(feed); err != nil {
+		slog.Error("delete feed", "err", err)
+		http.Error(w, "delete failed", http.StatusInternalServerError)
+		return
+	}
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+func sanitizeMode(v string, allowed []string, def string) string {
+	for _, a := range allowed {
+		if v == a {
+			return v
+		}
+	}
+	return def
+}
+
+func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request, u *store.User) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	feed, err := h.db.GetFeed(u.ID, id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	syncMode := sanitizeMode(r.FormValue("sync_mode"), []string{"mirror", "archive"}, feed.SyncMode)
+	reuploadMode := sanitizeMode(r.FormValue("reupload_mode"), []string{"replace", "keep"}, feed.ReuploadMode)
+	if err := h.db.UpdateFeedSettings(feed.ID, syncMode, reuploadMode); err != nil {
+		http.Error(w, "update failed", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/feeds/"+strconv.FormatInt(feed.ID, 10), http.StatusFound)
 }
 
 func (h *Handler) syncFeed(w http.ResponseWriter, r *http.Request, u *store.User) {

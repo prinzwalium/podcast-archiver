@@ -2,15 +2,12 @@ package archive
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -31,17 +28,14 @@ func NewEngine(db *store.DB, fetcher *Fetcher, cfg *config.Config) *Engine {
 
 var unsafeFilename = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
-// EpisodeDir returns the on-disk directory for a feed's media files.
-func (e *Engine) EpisodeDir(feed *store.Feed) string {
-	sum := sha256.Sum256([]byte(feed.SourceURL))
-	name := unsafeFilename.ReplaceAllString(strings.TrimSpace(feed.Title), "-")
-	if name == "" {
-		name = "feed"
-	}
-	if len(name) > 60 {
-		name = name[:60]
-	}
-	return filepath.Join(e.cfg.DataDir, "media", fmt.Sprintf("%s-%s", name, hex.EncodeToString(sum[:4])))
+// ContentDir returns the root directory for content-addressed media files.
+func (e *Engine) ContentDir() string {
+	return filepath.Join(e.cfg.DataDir, "media", "objects")
+}
+
+// objectPath maps a SHA-256 to its on-disk path (sharded to avoid huge dirs).
+func (e *Engine) objectPath(sha string) string {
+	return filepath.Join(e.ContentDir(), sha[:2], sha)
 }
 
 // enclosure returns the first audio enclosure of an item, or nil.
@@ -54,8 +48,8 @@ func enclosure(item *gofeed.Item) *gofeed.Enclosure {
 	return nil
 }
 
-// SyncFeed fetches the source feed, upserts episodes, deletes removed ones
-// (mirror mode), and downloads missing media files.
+// SyncFeed fetches the source feed, upserts episodes, applies the feed's sync
+// and reupload policies, and downloads missing media files.
 func (e *Engine) SyncFeed(ctx context.Context, feed *store.Feed) error {
 	parsed, err := e.fetcher.FetchFeed(ctx, feed.SourceURL)
 	if err != nil {
@@ -68,7 +62,6 @@ func (e *Engine) SyncFeed(ctx context.Context, feed *store.Feed) error {
 	}
 
 	var guids []string
-	dir := e.EpisodeDir(feed)
 	for _, item := range parsed.Items {
 		enc := enclosure(item)
 		if enc == nil {
@@ -80,7 +73,7 @@ func (e *Engine) SyncFeed(ctx context.Context, feed *store.Feed) error {
 		}
 		guids = append(guids, guid)
 
-		length, _ := strconv.ParseInt(strings.TrimSpace(enc.Length), 10, 64)
+		length, _ := strconvParse64(strings.TrimSpace(enc.Length))
 		ep := &store.Episode{
 			FeedID:         feed.ID,
 			GUID:           guid,
@@ -93,22 +86,27 @@ func (e *Engine) SyncFeed(ctx context.Context, feed *store.Feed) error {
 			DurationSecs:   itunesDuration(item),
 			ImageURL:       itemImage(item),
 		}
-		if _, err := e.db.UpsertEpisode(ep); err != nil {
+		enclosureChanged, err := e.db.UpsertEpisode(ep)
+		if err != nil {
 			slog.Warn("upsert episode failed", "feed", feed.ID, "guid", guid, "err", err)
+			continue
+		}
+		// Reupload handling: if the enclosure URL changed and the policy is
+		// "replace", clear the local file so it is re-downloaded. With "keep"
+		// the local copy is retained as-is.
+		if enclosureChanged && feed.KeepsReupload() {
+			slog.Info("enclosure changed, keeping local copy (reupload=keep)", "feed", feed.Title, "guid", guid)
 		}
 	}
 
 	// Mirror mode: delete local episodes the source removed.
-	removed, err := e.db.DeleteMissing(feed.ID, guids)
-	if err != nil {
-		return err
-	}
-	for _, p := range removed {
-		if p != "" {
-			full := filepath.Join(e.cfg.DataDir, "media", p)
-			if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
-				slog.Warn("cleanup failed", "path", full, "err", err)
-			}
+	if feed.IsMirror() {
+		shas, err := e.db.DeleteMissing(feed.ID, guids)
+		if err != nil {
+			return err
+		}
+		for _, sha := range shas {
+			e.unrefFile(sha)
 		}
 	}
 
@@ -118,7 +116,7 @@ func (e *Engine) SyncFeed(ctx context.Context, feed *store.Feed) error {
 		return err
 	}
 	for _, ep := range pending {
-		if err := e.downloadEpisode(ctx, feed, ep, dir); err != nil {
+		if err := e.downloadEpisode(ctx, feed, ep); err != nil {
 			slog.Warn("episode download failed", "feed", feed.ID, "guid", ep.GUID, "err", err)
 		}
 	}
@@ -126,30 +124,88 @@ func (e *Engine) SyncFeed(ctx context.Context, feed *store.Feed) error {
 	return e.db.UpdateFeedSync(feed.ID, time.Now().Unix(), "")
 }
 
-func (e *Engine) downloadEpisode(ctx context.Context, feed *store.Feed, ep *store.Episode, dir string) error {
-	filename := unsafeFilename.ReplaceAllString(ep.GUID, "-")
-	if len(filename) > 100 {
-		filename = filename[:100]
+// unrefFile decrements a file's refcount and removes it from disk when it
+// drops to zero.
+func (e *Engine) unrefFile(sha string) {
+	remove, err := e.db.FileUnref(sha)
+	if err != nil {
+		slog.Warn("file unref failed", "sha", sha, "err", err)
+		return
 	}
-	if filename == "" {
-		filename = strconv.FormatInt(ep.ID, 10)
+	if remove {
+		if err := os.Remove(e.objectPath(sha)); err != nil && !os.IsNotExist(err) {
+			slog.Warn("file removal failed", "sha", sha, "err", err)
+		}
 	}
-	ext := mediaExt(ep.EnclosureURL, ep.MimeType)
-	dest := filepath.Join(dir, filename+ext)
+}
 
+func (e *Engine) downloadEpisode(ctx context.Context, feed *store.Feed, ep *store.Episode) error {
 	slog.Info("downloading episode", "feed", feed.Title, "episode", ep.Title)
-	n, err := e.fetcher.Download(ctx, ep.EnclosureURL, dest, e.cfg.MaxEpisodeBytes, nil)
+
+	// Stream to a temp file while hashing; on success, rename into the
+	// content-addressed store, which deduplicates across feeds and users.
+	tmp, err := os.CreateTemp(e.ContentDir(), "dl-*")
+	if err != nil {
+		if err := os.MkdirAll(e.ContentDir(), 0o755); err != nil {
+			return err
+		}
+		tmp, err = os.CreateTemp(e.ContentDir(), "dl-*")
+		if err != nil {
+			return err
+		}
+	}
+	defer os.Remove(tmp.Name())
+
+	sha, size, err := e.fetcher.DownloadHashed(ctx, ep.EnclosureURL, tmp.Name(), e.cfg.MaxEpisodeBytes)
 	if err != nil {
 		return err
 	}
-	ep.FilePath = filepath.Join(filepath.Base(dir), filepath.Base(dest))
-	ep.FileBytes = n
-	return e.db.MarkEpisodeDownloaded(ep)
+
+	dest := e.objectPath(sha)
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	if _, err := os.Stat(dest); err == nil {
+		// Already stored (deduplicated); drop the temp copy.
+		if err := tmp.Close(); err != nil {
+			return err
+		}
+		slog.Info("episode already stored, deduplicated", "feed", feed.Title, "sha", sha[:12])
+	} else {
+		if err := tmp.Close(); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp.Name(), dest); err != nil {
+			return err
+		}
+	}
+
+	if err := e.db.FileRef(sha, size, ep.MimeType, mediaExt(ep.EnclosureURL, ep.MimeType)); err != nil {
+		return err
+	}
+	return e.db.MarkEpisodeDownloaded(ep, sha)
 }
 
 // PredictSize fetches the source feed and estimates total archive size.
 func (e *Engine) PredictSize(ctx context.Context, rawURL string) (*FeedPrediction, error) {
 	return e.fetcher.FetchPrediction(ctx, rawURL)
+}
+
+// DeleteFeed removes all episodes and decrements file refcounts.
+func (e *Engine) DeleteFeed(feed *store.Feed) error {
+	episodes, err := e.db.ListEpisodes(feed.ID)
+	if err != nil {
+		return err
+	}
+	if err := e.db.DeleteFeed(feed.UserID, feed.ID); err != nil {
+		return err
+	}
+	for _, ep := range episodes {
+		if ep.Downloaded && ep.FileSHA != "" {
+			e.unrefFile(ep.FileSHA)
+		}
+	}
+	return nil
 }
 
 func feedImage(f *gofeed.Feed) string {
@@ -190,6 +246,12 @@ func pubTime(item *gofeed.Item) int64 {
 		return item.UpdatedParsed.Unix()
 	}
 	return 0
+}
+
+func strconvParse64(s string) (int64, error) {
+	var n int64
+	_, err := fmt.Sscanf(s, "%d", &n)
+	return n, err
 }
 
 func enclosureMime(t string) string {

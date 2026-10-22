@@ -5,7 +5,22 @@
   <p>{{.Stats.TotalEpisodes}} episodes · {{.Stats.Downloaded}} downloaded · {{.Stats.DownloadedBytesFmt}} on disk · {{.Stats.TotalBytesFmt}} total predicted</p>
   {{if .Feed.LastError}}<p style="color:var(--danger)">Last sync error: {{.Feed.LastError}}</p>{{end}}
   <form class="inline" method="POST" action="/feeds/{{.Feed.ID}}/sync"><button type="submit">Sync now</button></form>
-  <form class="inline" method="POST" action="/feeds/{{.Feed.ID}}/delete" onsubmit="return confirm('Delete archive and metadata?')"><button class="danger" type="submit">Delete archive</button></form>
+  <form class="inline" method="POST" action="/feeds/{{.Feed.ID}}/delete" onsubmit="return confirm('Delete archive and metadata? Files shared with other feeds are kept.')"><button class="danger" type="submit">Delete archive</button></form>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Archive behavior</h3>
+  <form method="POST" action="/feeds/{{.Feed.ID}}/settings">
+    <p>
+      <label><input type="radio" name="sync_mode" value="mirror" {{if .Feed.IsMirror}}checked{{end}}> Mirror — follow the source feed: episodes removed by the creator disappear here too</label><br>
+      <label><input type="radio" name="sync_mode" value="archive" {{if not .Feed.IsMirror}}checked{{end}}> Archive — immutable: keep everything, even episodes the creator removes</label>
+    </p>
+    <p>
+      <label><input type="radio" name="reupload_mode" value="replace" {{if not .Feed.KeepsReupload}}checked{{end}}> Replace re-uploads — if the creator uploads a corrected file, download the new version</label><br>
+      <label><input type="radio" name="reupload_mode" value="keep" {{if .Feed.KeepsReupload}}checked{{end}}> Keep local copy — never re-download, even if the file changes upstream</label>
+    </p>
+    <button type="submit">Save settings</button>
+  </form>
 </div>
 
 <div class="card">

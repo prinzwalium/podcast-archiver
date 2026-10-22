@@ -2,6 +2,8 @@ package archive
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -150,51 +152,49 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// Download streams an episode to destPath with a hard size cap.
-// Returns bytes written.
-func (f *Fetcher) Download(ctx context.Context, rawURL, destPath string, maxBytes int64, progress func(int64)) (int64, error) {
+// DownloadHashed streams an episode to destPath while computing its SHA-256,
+// enforcing a hard size cap. Returns (sha256, bytesWritten).
+func (f *Fetcher) DownloadHashed(ctx context.Context, rawURL, destPath string, maxBytes int64) (string, int64, error) {
 	if err := ValidateURL(rawURL); err != nil {
-		return 0, err
+		return "", 0, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return 0, err
+		return "", 0, err
 	}
 	req.Header.Set("User-Agent", UserAgent)
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return 0, err
+		return "", 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("download: status %d", resp.StatusCode)
+		return "", 0, fmt.Errorf("download: status %d", resp.StatusCode)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-		return 0, err
+		return "", 0, err
 	}
 	out, err := os.Create(destPath)
 	if err != nil {
-		return 0, err
+		return "", 0, err
 	}
 	defer out.Close()
 
-	pr := &progressReader{r: resp.Body, progress: progress}
+	hash := sha256.New()
+	pr := &progressReader{r: io.TeeReader(resp.Body, hash)}
 	written, err := io.Copy(out, io.LimitReader(pr, maxBytes+1))
 	if err != nil {
-		os.Remove(destPath)
-		return 0, err
+		return "", 0, err
 	}
 	if written > maxBytes {
-		os.Remove(destPath)
-		return 0, fmt.Errorf("episode exceeds size limit (%d bytes)", maxBytes)
+		return "", 0, fmt.Errorf("episode exceeds size limit (%d bytes)", maxBytes)
 	}
 	if written == 0 {
-		os.Remove(destPath)
-		return 0, errors.New("empty response body")
+		return "", 0, errors.New("empty response body")
 	}
-	return written, nil
+	return hex.EncodeToString(hash.Sum(nil)), written, nil
 }

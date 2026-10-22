@@ -17,6 +17,8 @@ type DB struct {
 
 var ErrNotFound = errors.New("not found")
 
+func now() int64 { return time.Now().Unix() }
+
 func Open(path string) (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
@@ -49,6 +51,8 @@ func migrate(db *sql.DB) error {
 			image_url TEXT NOT NULL DEFAULT '',
 			description TEXT NOT NULL DEFAULT '',
 			link TEXT NOT NULL DEFAULT '',
+			sync_mode TEXT NOT NULL DEFAULT 'mirror',
+			reupload_mode TEXT NOT NULL DEFAULT 'replace',
 			created_at INTEGER NOT NULL,
 			last_sync INTEGER NOT NULL DEFAULT 0,
 			last_error TEXT NOT NULL DEFAULT '',
@@ -66,12 +70,18 @@ func migrate(db *sql.DB) error {
 			mime_type TEXT NOT NULL DEFAULT 'audio/mpeg',
 			duration_secs INTEGER NOT NULL DEFAULT 0,
 			image_url TEXT NOT NULL DEFAULT '',
-			file_path TEXT NOT NULL DEFAULT '',
-			file_bytes INTEGER NOT NULL DEFAULT 0,
+			file_sha TEXT NOT NULL DEFAULT '',
 			downloaded INTEGER NOT NULL DEFAULT 0,
 			CONSTRAINT uq_feed_guid UNIQUE (feed_id, guid)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_episodes_feed ON episodes(feed_id, published DESC)`,
+		`CREATE TABLE IF NOT EXISTS files (
+			sha TEXT PRIMARY KEY,
+			size INTEGER NOT NULL,
+			mime_type TEXT NOT NULL DEFAULT 'audio/mpeg',
+			ext TEXT NOT NULL DEFAULT '',
+			refcount INTEGER NOT NULL DEFAULT 1
+		)`,
 		`CREATE TABLE IF NOT EXISTS feed_tokens (
 			id INTEGER PRIMARY KEY,
 			feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
@@ -84,7 +94,22 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("%w: %s", err, s)
 		}
 	}
+	// Additive column migrations for databases created before v0.2.
+	additive := []struct{ table, col, ddl string }{
+		{"feeds", "sync_mode", "ALTER TABLE feeds ADD COLUMN sync_mode TEXT NOT NULL DEFAULT 'mirror'"},
+		{"feeds", "reupload_mode", "ALTER TABLE feeds ADD COLUMN reupload_mode TEXT NOT NULL DEFAULT 'replace'"},
+		{"episodes", "file_sha", "ALTER TABLE episodes ADD COLUMN file_sha TEXT NOT NULL DEFAULT ''"},
+		{"files", "refcount", "ALTER TABLE files ADD COLUMN refcount INTEGER NOT NULL DEFAULT 1"},
+	}
+	for _, a := range additive {
+		var ck string
+		if err := db.QueryRow(`SELECT name FROM pragma_table_info(?) WHERE name = ?`, a.table, a.col).Scan(&ck); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				if _, err := db.Exec(a.ddl); err != nil {
+					return fmt.Errorf("%w: %s", err, a.ddl)
+				}
+			}
+		}
+	}
 	return nil
 }
-
-func now() int64 { return time.Now().Unix() }
