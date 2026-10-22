@@ -35,8 +35,20 @@ func New(cfg *config.Config) *Service {
 	}
 	provider, err := oidc.NewProvider(context.Background(), cfg.OIDCIssuer)
 	if err != nil {
-		slog.Error("failed to initialize OIDC provider", "issuer", cfg.OIDCIssuer, "err", err)
-		return s
+		// go-oidc requires the issuer to match the discovery document exactly;
+		// Authentik serves it with a trailing slash. Retry with the slash
+		// toggled so both spellings work.
+		alt := toggleTrailingSlash(cfg.OIDCIssuer)
+		if alt == cfg.OIDCIssuer {
+			slog.Error("failed to initialize OIDC provider", "issuer", cfg.OIDCIssuer, "err", err)
+			return s
+		}
+		provider, err = oidc.NewProvider(context.Background(), alt)
+		if err != nil {
+			slog.Error("failed to initialize OIDC provider", "issuer", cfg.OIDCIssuer, "err", err)
+			return s
+		}
+		slog.Info("OIDC provider initialized with alternate issuer spelling", "issuer", alt)
 	}
 	s.verifier = provider.Verifier(&oidc.Config{ClientID: cfg.OIDCClientID})
 	s.oauth = &oauth2.Config{
@@ -47,6 +59,13 @@ func New(cfg *config.Config) *Service {
 		Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
 	}
 	return s
+}
+
+func toggleTrailingSlash(u string) string {
+	if strings.HasSuffix(u, "/") {
+		return strings.TrimSuffix(u, "/")
+	}
+	return u + "/"
 }
 
 func (s *Service) Enabled() bool { return s.cfg.AuthEnabled() && s.verifier != nil }

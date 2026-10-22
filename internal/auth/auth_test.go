@@ -30,3 +30,15 @@ func TestHasGroup(t *testing.T) {
 		t.Error("empty want-set should not match")
 	}
 }
+
+func TestToggleTrailingSlash(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"https://auth.example.com/application/o/app", "https://auth.example.com/application/o/app/"},
+		{"https://auth.example.com/application/o/app/", "https://auth.example.com/application/o/app"},
+	}
+	for _, tc := range cases {
+		if got := toggleTrailingSlash(tc.in); got != tc.want {
+			t.Errorf("toggleTrailingSlash(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

@@ -4,6 +4,14 @@ set -e
 PUID="${PUID:-1000}"
 PGID="${PGID:-1000}"
 
+# UMASK: default 022; applied before dropping privileges so downloaded
+# episodes and the database get predictable permissions on the host.
+if [ -n "${UMASK:-}" ]; then
+    umask "${UMASK}"
+else
+    umask 022
+fi
+
 # Create/group the runtime user if the requested IDs don't exist yet.
 if ! getent group "$PGID" >/dev/null 2>&1; then
     addgroup -g "$PGID" app >/dev/null 2>&1 || true
