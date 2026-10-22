@@ -5,6 +5,8 @@ services:
     ports:
       - "8080:8080"
     environment:
+      PUID: "1000"   # run as this UID (Unraid convention; matches file ownership on /data)
+      PGID: "1000"
       PA_SECRET_KEY: "change-me-openssl-rand-hex-32"
       PA_EXTERNAL_URL: "https://archiver.example.com"
       # --- OIDC via Authentik (optional; omit for single-user local mode) ---
