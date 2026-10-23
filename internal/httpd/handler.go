@@ -36,7 +36,11 @@ func (h *Handler) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// Token-authed podcatcher endpoints (no cookies needed).
+	// Podcatchers normalize feed URLs in various ways (trailing slash, .xml
+	// suffix); a prefix route lets the handler accept all common spellings.
 	mux.HandleFunc("GET /feed/{token}", h.feedEndpoint)
+	mux.HandleFunc("GET /feed/{token}/{$}", h.feedEndpoint)
+	mux.HandleFunc("GET /feed/", h.feedEndpointLegacy)
 	mux.HandleFunc("GET /media/{token}/{filename}", h.serveMedia)
 
 	// Web UI.
@@ -127,7 +131,27 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) feedEndpoint(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
+	// Podcatchers sometimes append .xml to feed URLs; accept it.
+	token := strings.TrimSuffix(r.PathValue("token"), ".xml")
+	feed, err := h.db.ResolveFeedToken(token)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	h.feedRSS(w, r, feed, token)
+}
+
+// feedEndpointLegacy handles /feed/<token> spellings the pattern router
+// can't express (e.g. ".xml" suffixes appended by podcatchers).
+func (h *Handler) feedEndpointLegacy(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(strings.Trim(r.URL.Path, "/"), "feed/")
+	token = strings.TrimSuffix(token, "/")
+	token = strings.TrimSuffix(token, ".xml")
+	token = strings.TrimSuffix(token, "/")
+	if token == "" || strings.Contains(token, "/") {
+		http.NotFound(w, r)
+		return
+	}
 	feed, err := h.db.ResolveFeedToken(token)
 	if err != nil {
 		http.NotFound(w, r)
