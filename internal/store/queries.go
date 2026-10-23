@@ -610,9 +610,11 @@ func (db *DB) ListFeedTokens(feedID int64) ([]*FeedToken, error) {
 	return out, rows.Err()
 }
 
+const feedColsF = `f.id, f.user_id, f.source_url, f.title, f.image_url, f.description, f.link, f.sync_mode, f.reupload_mode, f.refresh_secs, f.created_at, f.last_sync, f.last_error, f.fail_count`
+
 // ResolveFeedToken returns the feed for a token.
 func (db *DB) ResolveFeedToken(token string) (*Feed, error) {
-	rows, err := db.Query(`SELECT `+feedCols+` FROM feed_tokens t JOIN feeds f ON f.id = t.feed_id WHERE t.token = ?`, token)
+	rows, err := db.Query(`SELECT `+feedColsF+` FROM feed_tokens t JOIN feeds f ON f.id = t.feed_id WHERE t.token = ?`, token)
 	if err != nil {
 		return nil, err
 	}
