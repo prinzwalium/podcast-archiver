@@ -14,8 +14,31 @@ func (h *Handler) serveMedia(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	filename := filepath.Base(r.PathValue("filename"))
 
-	feed, err := h.db.ResolveFeedToken(token)
-	if err != nil {
+	// The token may belong to a normal feed or a merged feed; a merged
+	// token authorizes access to any member feed's files.
+	feed, ferr := h.db.ResolveFeedToken(token)
+	if ferr != nil {
+		merged, merr := h.db.ResolveMergedToken(token)
+		if merr != nil {
+			http.NotFound(w, r)
+			return
+		}
+		memberIDs, err := h.db.MergedFeedMembers(merged.ID)
+		if err != nil {
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		episodes, err := h.db.ListEpisodesForFeeds(memberIDs)
+		if err != nil {
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		for _, e := range episodes {
+			if e.Downloaded && e.FileSHA != "" && h.mediaName(e) == filename {
+				h.serveEpisodeFile(w, r, e)
+				return
+			}
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -37,6 +60,15 @@ func (h *Handler) serveMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.serveEpisodeFile(w, r, ep)
+}
+
+func (h *Handler) serveEpisodeFile(w http.ResponseWriter, r *http.Request, ep *store.Episode) {
+	filename := h.mediaName(ep)
+	if filename == "" {
+		http.NotFound(w, r)
+		return
+	}
 	file, err := h.db.GetFile(ep.FileSHA)
 	if err != nil {
 		http.NotFound(w, r)

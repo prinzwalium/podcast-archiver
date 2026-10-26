@@ -25,7 +25,10 @@ form.inline { display:inline; }
 </head>
 <body>
 <header>
+  <div style="display:flex;gap:1.2rem;align-items:center">
   <a href="/">📼 Podcast Archiver</a>
+  <a href="/merged" style="font-weight:400;font-size:0.9rem">Merged feeds</a>
+  </div>
   <div>
     <span class="muted">{{if .UserName}}{{.UserName}}{{end}}</span>
     {{if .IsAdmin}}<a href="/admin" class="btn" style="color:var(--accent);text-decoration:none">Admin</a>{{end}}
