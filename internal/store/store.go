@@ -102,6 +102,23 @@ func migrate(db *sql.DB) error {
 			created_at INTEGER NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_feed ON events(feed_id, id DESC)`,
+		`CREATE TABLE IF NOT EXISTS merged_feeds (
+			id INTEGER PRIMARY KEY,
+			user_id INTEGER NOT NULL REFERENCES users(id),
+			name TEXT NOT NULL,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS merged_feed_members (
+			merged_id INTEGER NOT NULL REFERENCES merged_feeds(id) ON DELETE CASCADE,
+			feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
+			PRIMARY KEY (merged_id, feed_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS merged_tokens (
+			id INTEGER PRIMARY KEY,
+			merged_id INTEGER NOT NULL REFERENCES merged_feeds(id) ON DELETE CASCADE,
+			token TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {

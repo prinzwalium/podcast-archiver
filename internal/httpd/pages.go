@@ -50,6 +50,13 @@ type pageData struct {
 	Prediction         *archive.FeedPrediction
 	PredictionURL      string
 	PredictionBytesFmt string
+	MergedFeeds        []*store.MergedFeed
+	MergedMembers      map[int64][]int64
+	Merged             *store.MergedFeed
+	MergedTokens       []*store.FeedToken
+	MemberFeeds        []*store.Feed
+	MemberIDs          []int64
+	MemberSelected     map[int64]bool
 }
 
 type episodeView struct {

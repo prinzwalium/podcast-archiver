@@ -1,0 +1,48 @@
+{{define "content-merged-detail"}}{{template "head" .}}
+<div class="card">
+  <h2 style="margin-top:0">{{.Merged.Name}}</h2>
+
+  <h3>Feed URL for your podcatcher</h3>
+  {{if .MergedTokens}}
+  {{range .MergedTokens}}
+  <p><code>{{$.ExternalURL}}/mfeed/{{.Token}}</code></p>
+  {{end}}
+  {{else}}
+  <p class="muted">No access token yet — create one below.</p>
+  {{end}}
+  <form class="inline" method="POST" action="/merged/{{.Merged.ID}}/tokens"><button type="submit">Create token</button></form>
+
+  {{if .MergedTokens}}
+  <h3>Tokens</h3>
+  <table>
+    {{range .MergedTokens}}
+    <tr>
+      <td><code>{{.Token}}</code></td>
+      <td>
+        <form class="inline" method="POST" action="/merged/{{$.Merged.ID}}/tokens/{{.Token}}/delete">
+          <button type="submit">Revoke</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{end}}
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Member feeds</h3>
+  <form method="POST" action="/merged/{{.Merged.ID}}">
+    {{range .MemberFeeds}}
+    <label style="display:block;margin:0.2rem 0"><input type="checkbox" name="members" value="{{.ID}}" {{if index $.MemberSelected .ID}}checked{{end}}> {{.Title}}</label>
+    {{end}}
+    <button type="submit">Save members</button>
+  </form>
+  <p class="muted">Removing a member only removes its episodes from the merged feed; the archive itself is untouched.</p>
+</div>
+
+<div class="card">
+  <form method="POST" action="/merged/{{.Merged.ID}}/delete" onsubmit="return confirm('Delete this merged feed? Member archives are kept.')">
+    <button type="submit" style="color:var(--danger)">Delete merged feed</button>
+  </form>
+</div>{{template "foot" .}}
+{{end}}

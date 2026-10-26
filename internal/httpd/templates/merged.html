@@ -1,0 +1,27 @@
+{{define "content-merged"}}{{template "head" .}}
+<div class="card">
+  <h2 style="margin-top:0">Create a merged feed</h2>
+  <p class="muted">Combine several archived podcasts into one RSS feed for your podcatcher. Episodes are merged newest-first; each episode keeps its show as author.</p>
+  <form method="POST" action="/merged">
+    <input type="text" name="name" placeholder="e.g. My daily shows" required style="width:100%;margin-bottom:0.6rem">
+    {{range .MemberFeeds}}
+    <label style="display:block;margin:0.2rem 0"><input type="checkbox" name="members" value="{{.ID}}"> {{.Title}} <span class="muted">({{.SourceURL}})</span></label>
+    {{end}}
+    {{if not .MemberFeeds}}<p class="muted">No feeds yet — add feeds first.</p>{{end}}
+    <button type="submit" {{if not .MemberFeeds}}disabled{{end}}>Create merged feed</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Your merged feeds</h2>
+  {{if not .MergedFeeds}}<p class="muted">None yet.</p>{{end}}
+  <table>
+    {{range .MergedFeeds}}
+    <tr>
+      <td><a href="/merged/{{.ID}}">{{.Name}}</a></td>
+      <td class="muted">{{len (index $.MergedMembers .ID)}} member feeds</td>
+    </tr>
+    {{end}}
+  </table>
+</div>{{template "foot" .}}
+{{end}}
