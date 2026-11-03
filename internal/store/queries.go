@@ -31,6 +31,8 @@ type Feed struct {
 	LastSync     int64
 	LastError    string
 	FailCount    int64
+	Note         string // free-text user note
+	SyncEnabled  bool   // false = excluded from scheduled and manual syncs
 }
 
 func (f *Feed) IsMirror() bool      { return f.SyncMode != "archive" }
@@ -153,14 +155,15 @@ func (db *DB) CreateFeed(userID int64, sourceURL, title, imageURL, description, 
 		SyncMode: syncMode, ReuploadMode: reuploadMode, CreatedAt: now()}, nil
 }
 
-const feedCols = `id, user_id, source_url, title, image_url, description, link, sync_mode, reupload_mode, refresh_secs, created_at, last_sync, last_error, fail_count`
+const feedCols = `id, user_id, source_url, title, image_url, description, link, sync_mode, reupload_mode, refresh_secs, created_at, last_sync, last_error, fail_count, note, sync_enabled`
 
 func scanFeeds(rows *sql.Rows) ([]*Feed, error) {
 	var out []*Feed
 	for rows.Next() {
 		f := &Feed{}
 		if err := rows.Scan(&f.ID, &f.UserID, &f.SourceURL, &f.Title, &f.ImageURL, &f.Description, &f.Link,
-			&f.SyncMode, &f.ReuploadMode, &f.RefreshSecs, &f.CreatedAt, &f.LastSync, &f.LastError, &f.FailCount); err != nil {
+			&f.SyncMode, &f.ReuploadMode, &f.RefreshSecs, &f.CreatedAt, &f.LastSync, &f.LastError, &f.FailCount,
+			&f.Note, &f.SyncEnabled); err != nil {
 			return nil, err
 		}
 		out = append(out, f)
@@ -224,6 +227,32 @@ func (db *DB) UpdateFeedSettings(feedID int64, syncMode, reuploadMode string, re
 
 // AddEvent records a sync activity event. Kinds: episode_added, episode_removed,
 // episode_replaced, feed_error, feed_recovered.
+// UpdateFeedNote sets the free-text user note on a feed.
+func (db *DB) UpdateFeedNote(userID, feedID int64, note string) error {
+	res, err := db.Exec(`UPDATE feeds SET note = ? WHERE id = ? AND user_id = ?`, note, feedID, userID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetFeedSyncEnabled enables or disables syncing for a feed.
+func (db *DB) SetFeedSyncEnabled(userID, feedID int64, enabled bool) error {
+	res, err := db.Exec(`UPDATE feeds SET sync_enabled = ? WHERE id = ? AND user_id = ?`, enabled, feedID, userID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (db *DB) AddEvent(feedID int64, kind, detail string) error {
 	_, err := db.Exec(`INSERT INTO events (feed_id, kind, detail, created_at) VALUES (?, ?, ?, ?)`,
 		feedID, kind, detail, now())

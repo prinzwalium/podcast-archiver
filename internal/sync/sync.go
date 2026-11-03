@@ -51,7 +51,11 @@ func (s *Service) setSyncing(feedID int64, on bool) {
 }
 
 // syncFeed runs a single feed sync with running-state tracking.
+// Feeds with syncing disabled are skipped (scheduled or manual).
 func (s *Service) syncFeed(ctx context.Context, feed *store.Feed) {
+	if !feed.SyncEnabled {
+		return
+	}
 	s.setSyncing(feed.ID, true)
 	defer s.setSyncing(feed.ID, false)
 	if err := s.engine.SyncFeed(ctx, feed); err != nil {
@@ -110,6 +114,9 @@ func (s *Service) SyncDue(ctx context.Context) {
 		if feed.LastSync > 0 && time.Since(time.Unix(feed.LastSync, 0)) < interval {
 			continue
 		}
+		if !feed.SyncEnabled {
+			continue // sync paused by the user
+		}
 		s.syncFeed(ctx, feed)
 	}
 }
@@ -122,6 +129,8 @@ func (s *Service) SyncAll(ctx context.Context) {
 		return
 	}
 	for _, feed := range feeds {
-		s.syncFeed(ctx, feed)
+		if feed.SyncEnabled {
+			s.syncFeed(ctx, feed)
+		}
 	}
 }
