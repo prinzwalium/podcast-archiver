@@ -53,6 +53,8 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /export/opml", h.requireUser(h.exportOPML))
 	mux.HandleFunc("POST /import/opml", h.requireUser(h.importOPML))
 	mux.HandleFunc("GET /feeds/{id}/events", h.requireUser(h.pageEvents))
+	// Embedded fonts for the UI theme.
+	mux.HandleFunc("GET /fonts/{name}", h.serveFont)
 	mux.HandleFunc("GET /merged", h.requireUser(h.pageMerged))
 	mux.HandleFunc("GET /merged/{id}", h.requireUser(h.pageMergedDetail))
 	mux.HandleFunc("POST /merged", h.requireUser(h.createMerged))
