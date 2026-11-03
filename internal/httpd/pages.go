@@ -15,6 +15,9 @@ import (
 //go:embed templates/*.html
 var templateFS embed.FS
 
+//go:embed fonts/*.woff2
+var fontFS embed.FS
+
 var templates = template.Must(template.ParseFS(templateFS, "templates/*.html"))
 
 func fmtBytes(b int64) string {

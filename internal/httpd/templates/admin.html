@@ -16,8 +16,8 @@
       <td>{{if .IsAdmin}}admin{{else}}user{{end}}</td>
       <td>
         <form class="inline" method="POST" action="/admin/users/{{.ID}}/update">
-          <input type="number" name="max_feeds" min="0" value="{{.MaxFeeds}}" title="Max feeds (0 = unlimited)" style="width:5rem;padding:0.3rem;border:1px solid var(--border);border-radius:6px">
-          <input type="number" name="max_bytes" min="0" value="{{.MaxBytes}}" title="Max bytes (0 = unlimited)" style="width:9rem;padding:0.3rem;border:1px solid var(--border);border-radius:6px">
+          <input type="number" name="max_feeds" min="0" value="{{.MaxFeeds}}" title="Max feeds (0 = unlimited)" style="width:5rem;padding:0.3rem;border:1px solid var(--line);border-radius:6px">
+          <input type="number" name="max_bytes" min="0" value="{{.MaxBytes}}" title="Max bytes (0 = unlimited)" style="width:9rem;padding:0.3rem;border:1px solid var(--line);border-radius:6px">
           <button type="submit">Save</button>
         </form>
         <span class="muted">({{.MaxBytesFmt}})</span>
