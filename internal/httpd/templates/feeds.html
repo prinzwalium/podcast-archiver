@@ -24,7 +24,7 @@
     <tr>
       <td><a href="/feeds/{{.ID}}">{{if .Title}}{{.Title}}{{else}}(untitled — syncing){{end}}</a></td>
       <td class="muted">{{.SourceURL}}</td>
-      <td>{{if .LastError}}<span style="color:var(--danger)" title="{{.LastError}}">sync error</span>{{else if .LastSync}}<span class="muted">synced</span>{{else}}<span class="muted">pending</span>{{end}}</td>
+      <td>{{if not .SyncEnabled}}<span class="pill pill--bad">paused</span>{{else if .LastError}}<span style="color:var(--danger)" title="{{.LastError}}">sync error</span>{{else if .LastSync}}<span class="muted">synced</span>{{else}}<span class="muted">pending</span>{{end}}</td>
     </tr>
     {{end}}
   </table>

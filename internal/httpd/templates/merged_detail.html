@@ -30,6 +30,14 @@
 </div>
 
 <div class="card">
+  <h3 style="margin-top:0">Note</h3>
+  <form method="POST" action="/merged/{{.Merged.ID}}/note">
+    <textarea name="note" rows="3" placeholder="Your private note for this merged feed…">{{.Merged.Note}}</textarea>
+    <button type="submit">Save note</button>
+  </form>
+</div>
+
+<div class="card">
   <h3 style="margin-top:0">Member feeds</h3>
   <form method="POST" action="/merged/{{.Merged.ID}}">
     {{range .MemberFeeds}}

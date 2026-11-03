@@ -3,10 +3,24 @@
   <h2 style="margin-top:0">{{.Feed.Title}} <span id="sync-badge" class="pill" style="display:none;border-color:var(--accent);color:var(--accent-fg);font-weight:700;vertical-align:middle">⏳ syncing…</span></h2>
   <p class="muted">{{.Feed.SourceURL}}</p>
   <p>{{.Stats.TotalEpisodes}} episodes · {{.Stats.Downloaded}} downloaded · {{.Stats.DownloadedBytesFmt}} on disk · {{.Stats.TotalBytesFmt}} total predicted</p>
+  {{if not .Feed.SyncEnabled}}<p><span class="pill pill--bad">sync paused</span></p>{{end}}
   {{if .Feed.LastError}}<p style="color:var(--danger)">Last sync error: {{.Feed.LastError}}</p>{{end}}
-  <form class="inline" method="POST" action="/feeds/{{.Feed.ID}}/sync"><button type="submit" title="Queues a background sync">Sync now</button></form>
+  <form class="inline" method="POST" action="/feeds/{{.Feed.ID}}/sync"><button type="submit" title="Queues a background sync" {{if not .Feed.SyncEnabled}}disabled{{end}}>Sync now</button></form>
+  {{if .Feed.SyncEnabled}}
+  <form class="inline" method="POST" action="/feeds/{{.Feed.ID}}/pause"><button type="submit" class="danger" title="Stop scheduled and manual syncs; the archive is kept">Pause sync</button></form>
+  {{else}}
+  <form class="inline" method="POST" action="/feeds/{{.Feed.ID}}/resume"><button type="submit" class="btn--loud" title="Re-enable syncing">Resume sync</button></form>
+  {{end}}
   <p class="muted" style="margin:0.3rem 0 0">Sync now queues a background sync — watch the <a href="/feeds/{{.Feed.ID}}/events">activity log</a> or refresh this page for progress.</p>
   <form class="inline" method="POST" action="/feeds/{{.Feed.ID}}/delete" onsubmit="return confirm('Delete archive and metadata? Files shared with other feeds are kept.')"><button class="danger" type="submit">Delete archive</button></form>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Note</h3>
+  <form method="POST" action="/feeds/{{.Feed.ID}}/note">
+    <textarea name="note" rows="3" placeholder="Your private note for this archive — why you keep it, what to listen for, …">{{.Feed.Note}}</textarea>
+    <button type="submit">Save note</button>
+  </form>
 </div>
 
 <div class="card">

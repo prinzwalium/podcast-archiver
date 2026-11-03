@@ -10,6 +10,7 @@ type MergedFeed struct {
 	UserID    int64
 	Name      string
 	CreatedAt int64
+	Note      string // free-text user note
 }
 
 // CreateMergedFeed creates a merged feed with the given member feed IDs.
@@ -51,7 +52,7 @@ func (db *DB) CreateMergedFeed(userID int64, name string, memberIDs []int64) (*M
 
 // ListMergedFeeds returns the user's merged feeds with their member feed IDs.
 func (db *DB) ListMergedFeeds(userID int64) ([]*MergedFeed, map[int64][]int64, error) {
-	rows, err := db.Query(`SELECT id, user_id, name, created_at FROM merged_feeds WHERE user_id = ? ORDER BY created_at`, userID)
+	rows, err := db.Query(`SELECT id, user_id, name, created_at, note FROM merged_feeds WHERE user_id = ? ORDER BY created_at`, userID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -59,7 +60,7 @@ func (db *DB) ListMergedFeeds(userID int64) ([]*MergedFeed, map[int64][]int64, e
 	var out []*MergedFeed
 	for rows.Next() {
 		m := &MergedFeed{}
-		if err := rows.Scan(&m.ID, &m.UserID, &m.Name, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.UserID, &m.Name, &m.CreatedAt, &m.Note); err != nil {
 			return nil, nil, err
 		}
 		out = append(out, m)
@@ -92,8 +93,8 @@ func (db *DB) ListMergedFeeds(userID int64) ([]*MergedFeed, map[int64][]int64, e
 // GetMergedFeed returns one merged feed owned by the user.
 func (db *DB) GetMergedFeed(userID, mergedID int64) (*MergedFeed, error) {
 	m := &MergedFeed{}
-	err := db.QueryRow(`SELECT id, user_id, name, created_at FROM merged_feeds WHERE id = ? AND user_id = ?`, mergedID, userID).
-		Scan(&m.ID, &m.UserID, &m.Name, &m.CreatedAt)
+	err := db.QueryRow(`SELECT id, user_id, name, created_at, note FROM merged_feeds WHERE id = ? AND user_id = ?`, mergedID, userID).
+		Scan(&m.ID, &m.UserID, &m.Name, &m.CreatedAt, &m.Note)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -169,6 +170,19 @@ func (db *DB) UpdateMergedFeedMembers(userID, mergedID int64, memberIDs []int64)
 	return tx.Commit()
 }
 
+// UpdateMergedNote sets the free-text user note on a merged feed.
+func (db *DB) UpdateMergedNote(userID, mergedID int64, note string) error {
+	res, err := db.Exec(`UPDATE merged_feeds SET note = ? WHERE id = ? AND user_id = ?`, note, mergedID, userID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // CreateMergedToken / merged token management mirror feed tokens.
 func (db *DB) CreateMergedToken(mergedID int64, token string) error {
 	_, err := db.Exec(`INSERT INTO merged_tokens (merged_id, token, created_at) VALUES (?, ?, ?)`, mergedID, token, now())
@@ -200,9 +214,9 @@ func (db *DB) ListMergedTokens(mergedID int64) ([]*FeedToken, error) {
 // ResolveMergedToken returns the merged feed for a token.
 func (db *DB) ResolveMergedToken(token string) (*MergedFeed, error) {
 	m := &MergedFeed{}
-	err := db.QueryRow(`SELECT m.id, m.user_id, m.name, m.created_at FROM merged_tokens t
+	err := db.QueryRow(`SELECT m.id, m.user_id, m.name, m.created_at, m.note FROM merged_tokens t
 		JOIN merged_feeds m ON m.id = t.merged_id WHERE t.token = ?`, token).
-		Scan(&m.ID, &m.UserID, &m.Name, &m.CreatedAt)
+		Scan(&m.ID, &m.UserID, &m.Name, &m.CreatedAt, &m.Note)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

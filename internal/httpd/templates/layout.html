@@ -207,6 +207,19 @@ form button.danger:hover { background: var(--danger); color: #fff; }
 /* fields */
 .field { display: flex; align-items: center; gap: 10px; }
 .field__label { flex: 0 0 auto; font-size: 0.78rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--fg-faint); }
+textarea {
+	min-width: 0;
+	width: 100%;
+	padding: 6px 9px;
+	font: inherit;
+	font-size: 0.9rem;
+	color: var(--fg);
+	background: var(--panel-2);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-sm);
+	resize: vertical;
+}
+textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .input, input[type=text], input[type=url], input[type=file], select {
 	min-width: 0;
 	padding: 6px 9px;
