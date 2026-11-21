@@ -31,6 +31,7 @@ type Feed struct {
 	LastSync     int64
 	LastError    string
 	FailCount    int64
+	Language     string
 }
 
 func (f *Feed) IsMirror() bool      { return f.SyncMode != "archive" }
@@ -51,6 +52,11 @@ type Episode struct {
 	FileSHA        string
 	Downloaded     bool
 	Pinned         bool
+
+	// Joined from files for downloaded episodes; zero otherwise.
+	FileSize int64
+	FileExt  string
+	FileMime string
 }
 
 type File struct {
@@ -153,14 +159,14 @@ func (db *DB) CreateFeed(userID int64, sourceURL, title, imageURL, description, 
 		SyncMode: syncMode, ReuploadMode: reuploadMode, CreatedAt: now()}, nil
 }
 
-const feedCols = `id, user_id, source_url, title, image_url, description, link, sync_mode, reupload_mode, refresh_secs, created_at, last_sync, last_error, fail_count`
+const feedCols = `id, user_id, source_url, title, image_url, description, link, sync_mode, reupload_mode, refresh_secs, created_at, last_sync, last_error, fail_count, language`
 
 func scanFeeds(rows *sql.Rows) ([]*Feed, error) {
 	var out []*Feed
 	for rows.Next() {
 		f := &Feed{}
 		if err := rows.Scan(&f.ID, &f.UserID, &f.SourceURL, &f.Title, &f.ImageURL, &f.Description, &f.Link,
-			&f.SyncMode, &f.ReuploadMode, &f.RefreshSecs, &f.CreatedAt, &f.LastSync, &f.LastError, &f.FailCount); err != nil {
+			&f.SyncMode, &f.ReuploadMode, &f.RefreshSecs, &f.CreatedAt, &f.LastSync, &f.LastError, &f.FailCount, &f.Language); err != nil {
 			return nil, err
 		}
 		out = append(out, f)
@@ -202,16 +208,11 @@ func (db *DB) GetFeed(userID, feedID int64) (*Feed, error) {
 	return feeds[0], nil
 }
 
-func (db *DB) DeleteFeed(userID, feedID int64) error {
-	res, err := db.Exec(`DELETE FROM feeds WHERE id = ? AND user_id = ?`, feedID, userID)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
+// CountFeeds returns how many feeds a user has.
+func (db *DB) CountFeeds(userID int64) (int, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM feeds WHERE user_id = ?`, userID).Scan(&n)
+	return n, err
 }
 
 // UpdateFeedSettings changes sync_mode / reupload_mode / refresh interval.
@@ -256,9 +257,16 @@ func (db *DB) ListEvents(feedID int64, limit int) ([]*Event, error) {
 	return out, rows.Err()
 }
 
-// RecentFailures returns feeds with consecutive sync failures, for alerting.
-func (db *DB) RecentFailures() ([]*Feed, error) {
-	rows, err := db.Query(`SELECT ` + feedCols + ` FROM feeds WHERE fail_count > 0 ORDER BY fail_count DESC`)
+// RecentFailures returns a user's feeds with consecutive sync failures, for
+// alerting. userID 0 returns failing feeds of all users (admin view).
+func (db *DB) RecentFailures(userID int64) ([]*Feed, error) {
+	q := `SELECT ` + feedCols + ` FROM feeds WHERE fail_count > 0`
+	var args []any
+	if userID != 0 {
+		q += ` AND user_id = ?`
+		args = append(args, userID)
+	}
+	rows, err := db.Query(q+` ORDER BY fail_count DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -281,74 +289,22 @@ func (db *DB) SetEpisodePin(userID, feedID int64, guid string, pinned bool) erro
 	return nil
 }
 
-// DeleteUser removes a user and all their feeds, decrementing file
-// refcounts. Feed deletion cascades to episodes/tokens/events.
-func (db *DB) DeleteUser(userID int64) error {
-	// Collect file SHAs before the cascade wipes episodes.
-	rows, err := db.Query(`SELECT DISTINCT e.file_sha FROM episodes e
-		JOIN feeds f ON f.id = e.feed_id WHERE f.user_id = ? AND e.downloaded = 1 AND e.file_sha != ''`, userID)
-	if err != nil {
-		return err
-	}
-	var shas []string
-	for rows.Next() {
-		var sha string
-		if err := rows.Scan(&sha); err != nil {
-			rows.Close()
-			return err
-		}
-		shas = append(shas, sha)
-	}
-	rows.Close()
-
-	res, err := db.Exec(`DELETE FROM users WHERE id = ?`, userID)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ErrNotFound
-	}
-	_ = shas // refcount decrement handled by caller via engine
-	return nil
-}
-
-// UserFileSHAs lists distinct file SHAs referenced by a user's episodes,
-// for refcount cleanup after user deletion.
-func (db *DB) UserFileSHAs(userID int64) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT e.file_sha FROM episodes e
-		JOIN feeds f ON f.id = e.feed_id WHERE f.user_id = ? AND e.downloaded = 1 AND e.file_sha != ''`, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var shas []string
-	for rows.Next() {
-		var sha string
-		if err := rows.Scan(&sha); err != nil {
-			return nil, err
-		}
-		shas = append(shas, sha)
-	}
-	return shas, rows.Err()
-}
-
 // UpdateUserQuotas sets per-user feed/byte limits (0 = unlimited).
 func (db *DB) UpdateUserQuotas(userID, maxFeeds, maxBytes int64) error {
 	_, err := db.Exec(`UPDATE users SET max_feeds = ?, max_bytes = ? WHERE id = ?`, maxFeeds, maxBytes, userID)
 	return err
 }
 
-// UserStorageBytes sums unique file sizes referenced by a user's episodes,
-// apportioned by refcount so shared files count fractionally toward quotas.
+// UserStorageBytes sums the sizes of files referenced by a user's episodes,
+// apportioned by refcount (rounded) so shared files count fractionally toward quotas.
 func (db *DB) UserStorageBytes(userID int64) (int64, error) {
-	var v sql.NullFloat64
-	err := db.QueryRow(`SELECT COALESCE(SUM(fl.size * 1.0 / fl.refcount), 0)
+	var v int64
+	err := db.QueryRow(`SELECT COALESCE(SUM((fl.size + MAX(fl.refcount, 1) / 2) / MAX(fl.refcount, 1)), 0)
 		FROM episodes e
 		JOIN feeds f ON f.id = e.feed_id
 		JOIN files fl ON fl.sha = e.file_sha
 		WHERE f.user_id = ? AND e.downloaded = 1`, userID).Scan(&v)
-	return int64(v.Float64), err
+	return v, err
 }
 
 func btoi(b bool) int {
@@ -372,93 +328,67 @@ func (db *DB) UpdateFeedSync(feedID int64, ts int64, syncErr string) error {
 	return err
 }
 
-func (db *DB) UpdateFeedMeta(feedID int64, title, imageURL, description, link string) error {
-	_, err := db.Exec(`UPDATE feeds SET title = ?, image_url = ?, description = ?, link = ? WHERE id = ?`,
-		title, imageURL, description, link, feedID)
+func (db *DB) UpdateFeedMeta(feedID int64, title, imageURL, description, link, language string) error {
+	_, err := db.Exec(`UPDATE feeds SET title = ?, image_url = ?, description = ?, link = ?, language = ? WHERE id = ?`,
+		title, imageURL, description, link, language, feedID)
 	return err
 }
 
-// UpsertEpisode inserts or refreshes feed metadata for an episode. It never
-// touches download state (file_sha/downloaded/pinned), which the engine manages.
-// Returns (isNew, enclosureChanged).
-func (db *DB) UpsertEpisode(ep *Episode) (bool, bool, error) {
-	var oldEnclosure string
-	err := db.QueryRow(`SELECT enclosure_url FROM episodes WHERE feed_id = ? AND guid = ?`, ep.FeedID, ep.GUID).Scan(&oldEnclosure)
+// UpsertEpisode inserts or refreshes feed metadata for an episode and resets
+// its mirror-missing counter. It never touches download state
+// (file_sha/downloaded/pinned), which the engine manages. For existing
+// episodes it returns the previous enclosure URL and declared length.
+func (db *DB) UpsertEpisode(ep *Episode) (isNew bool, oldURL string, oldBytes int64, err error) {
+	err = db.QueryRow(`SELECT enclosure_url, enclosure_bytes FROM episodes WHERE feed_id = ? AND guid = ?`, ep.FeedID, ep.GUID).Scan(&oldURL, &oldBytes)
 	if errors.Is(err, sql.ErrNoRows) {
 		_, err := db.Exec(`INSERT INTO episodes
 			(feed_id, guid, title, published, description, enclosure_url, enclosure_bytes, mime_type, duration_secs, image_url)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			ep.FeedID, ep.GUID, ep.Title, ep.Published, ep.Description, ep.EnclosureURL, ep.EnclosureBytes, ep.MimeType, ep.DurationSecs, ep.ImageURL)
-		return true, false, err
+		return true, "", 0, err
 	}
 	if err != nil {
-		return false, false, err
+		return false, "", 0, err
 	}
 	_, err = db.Exec(`UPDATE episodes SET
-			title = ?, published = ?, description = ?, enclosure_url = ?, enclosure_bytes = ?, mime_type = ?, duration_secs = ?, image_url = ?
+			title = ?, published = ?, description = ?, enclosure_url = ?, enclosure_bytes = ?, mime_type = ?, duration_secs = ?, image_url = ?,
+			missing_syncs = 0
 		WHERE feed_id = ? AND guid = ?`,
 		ep.Title, ep.Published, ep.Description, ep.EnclosureURL, ep.EnclosureBytes, ep.MimeType, ep.DurationSecs, ep.ImageURL,
 		ep.FeedID, ep.GUID)
-	return false, oldEnclosure != ep.EnclosureURL, err
+	return false, oldURL, oldBytes, err
 }
 
-// ClearEpisodeFile clears download state for an episode whose content changed
-// upstream (reupload with "replace" policy) so the engine re-downloads it.
-func (db *DB) ClearEpisodeFile(feedID int64, guid string) error {
-	_, err := db.Exec(`UPDATE episodes SET downloaded = 0, file_sha = '' WHERE feed_id = ? AND guid = ?`, feedID, guid)
-	return err
-}
-
-// DeleteMissing removes episodes whose GUIDs are absent from the given set
-// (mirror mode). Pinned episodes survive. Returns removed GUIDs and the SHAs of
-// their files for refcount decrement.
-func (db *DB) DeleteMissing(feedID int64, keepGUIDs []string) (removedGUIDs []string, shas []string, err error) {
-	rows, err := db.Query(`SELECT guid, file_sha, pinned FROM episodes WHERE feed_id = ?`, feedID)
+// EpisodeGUIDs returns the GUIDs of a feed's unpinned episodes.
+func (db *DB) EpisodeGUIDs(feedID int64) ([]string, error) {
+	rows, err := db.Query(`SELECT guid FROM episodes WHERE feed_id = ? AND pinned = 0`, feedID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	type row struct {
-		guid, sha string
-		pinned    bool
-	}
-	var existing []row
+	defer rows.Close()
+	var out []string
 	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.guid, &r.sha, &r.pinned); err != nil {
-			rows.Close()
-			return nil, nil, err
+		var g string
+		if err := rows.Scan(&g); err != nil {
+			return nil, err
 		}
-		existing = append(existing, r)
+		out = append(out, g)
 	}
-	rows.Close()
-
-	keep := map[string]bool{}
-	for _, g := range keepGUIDs {
-		keep[g] = true
-	}
-	for _, r := range existing {
-		if !keep[r.guid] && !r.pinned {
-			if _, err := db.Exec(`DELETE FROM episodes WHERE feed_id = ? AND guid = ?`, feedID, r.guid); err != nil {
-				return removedGUIDs, shas, err
-			}
-			removedGUIDs = append(removedGUIDs, r.guid)
-			if r.sha != "" {
-				shas = append(shas, r.sha)
-			}
-		}
-	}
-	return removedGUIDs, shas, nil
+	return out, rows.Err()
 }
 
-const episodeCols = `id, feed_id, guid, title, published, description, enclosure_url, enclosure_bytes,
-	mime_type, duration_secs, image_url, file_sha, downloaded, pinned`
+const episodeSelect = `SELECT e.id, e.feed_id, e.guid, e.title, e.published, e.description, e.enclosure_url, e.enclosure_bytes,
+	e.mime_type, e.duration_secs, e.image_url, e.file_sha, e.downloaded, e.pinned,
+	COALESCE(fl.size, 0), COALESCE(fl.ext, ''), COALESCE(fl.mime_type, '')
+	FROM episodes e LEFT JOIN files fl ON e.downloaded = 1 AND fl.sha = e.file_sha`
 
 func scanEpisodes(rows *sql.Rows) ([]*Episode, error) {
 	var out []*Episode
 	for rows.Next() {
 		e := &Episode{}
 		if err := rows.Scan(&e.ID, &e.FeedID, &e.GUID, &e.Title, &e.Published, &e.Description, &e.EnclosureURL,
-			&e.EnclosureBytes, &e.MimeType, &e.DurationSecs, &e.ImageURL, &e.FileSHA, &e.Downloaded, &e.Pinned); err != nil {
+			&e.EnclosureBytes, &e.MimeType, &e.DurationSecs, &e.ImageURL, &e.FileSHA, &e.Downloaded, &e.Pinned,
+			&e.FileSize, &e.FileExt, &e.FileMime); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -467,7 +397,7 @@ func scanEpisodes(rows *sql.Rows) ([]*Episode, error) {
 }
 
 func (db *DB) ListEpisodes(feedID int64) ([]*Episode, error) {
-	rows, err := db.Query(`SELECT `+episodeCols+` FROM episodes WHERE feed_id = ? ORDER BY published DESC`, feedID)
+	rows, err := db.Query(episodeSelect+` WHERE e.feed_id = ? ORDER BY e.published DESC`, feedID)
 	if err != nil {
 		return nil, err
 	}
@@ -476,7 +406,7 @@ func (db *DB) ListEpisodes(feedID int64) ([]*Episode, error) {
 }
 
 func (db *DB) UndownloadedEpisodes(feedID int64) ([]*Episode, error) {
-	rows, err := db.Query(`SELECT `+episodeCols+` FROM episodes WHERE feed_id = ? AND downloaded = 0 ORDER BY published ASC`, feedID)
+	rows, err := db.Query(episodeSelect+` WHERE e.feed_id = ? AND e.downloaded = 0 ORDER BY e.published ASC`, feedID)
 	if err != nil {
 		return nil, err
 	}
@@ -484,35 +414,26 @@ func (db *DB) UndownloadedEpisodes(feedID int64) ([]*Episode, error) {
 	return scanEpisodes(rows)
 }
 
-// FileRef increments the refcount for a stored file (or inserts it).
-func (db *DB) FileRef(sha string, size int64, mimeType, ext string) error {
-	_, err := db.Exec(`INSERT INTO files (sha, size, mime_type, ext, refcount) VALUES (?, ?, ?, ?, 1)
-		ON CONFLICT(sha) DO UPDATE SET refcount = refcount + 1`, sha, size, mimeType, ext)
-	return err
-}
-
-// FileUnref decrements the refcount and reports whether the file should be
-// removed from disk (refcount reached zero).
-func (db *DB) FileUnref(sha string) (bool, error) {
-	res, err := db.Exec(`UPDATE files SET refcount = refcount - 1 WHERE sha = ?`, sha)
+// FindDownloadedEpisode returns a downloaded episode of one of the given
+// feeds that is stored as the file with this SHA.
+func (db *DB) FindDownloadedEpisode(feedIDs []int64, sha string) (*Episode, error) {
+	if len(feedIDs) == 0 {
+		return nil, ErrNotFound
+	}
+	q, args := sqlInInt64(episodeSelect+` WHERE e.downloaded = 1 AND e.file_sha = ? AND fl.sha IS NOT NULL AND e.feed_id IN (`, feedIDs)
+	rows, err := db.Query(q+`) LIMIT 1`, append([]any{sha}, args...)...)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return false, nil
+	defer rows.Close()
+	eps, err := scanEpisodes(rows)
+	if err != nil {
+		return nil, err
 	}
-	var rc int64
-	if err := db.QueryRow(`SELECT refcount FROM files WHERE sha = ?`, sha).Scan(&rc); err != nil {
-		return false, err
+	if len(eps) == 0 {
+		return nil, ErrNotFound
 	}
-	if rc <= 0 {
-		if _, err := db.Exec(`DELETE FROM files WHERE sha = ?`, sha); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-	return false, nil
+	return eps[0], nil
 }
 
 // FileExists checks whether a content-addressed file is already stored.
@@ -533,11 +454,6 @@ func (db *DB) GetFile(sha string) (*File, error) {
 		return nil, ErrNotFound
 	}
 	return f, err
-}
-
-func (db *DB) MarkEpisodeDownloaded(ep *Episode, sha string) error {
-	_, err := db.Exec(`UPDATE episodes SET downloaded = 1, file_sha = ? WHERE id = ?`, sha, ep.ID)
-	return err
 }
 
 // FeedStats aggregates per-feed totals.
@@ -610,7 +526,7 @@ func (db *DB) ListFeedTokens(feedID int64) ([]*FeedToken, error) {
 	return out, rows.Err()
 }
 
-const feedColsF = `f.id, f.user_id, f.source_url, f.title, f.image_url, f.description, f.link, f.sync_mode, f.reupload_mode, f.refresh_secs, f.created_at, f.last_sync, f.last_error, f.fail_count`
+const feedColsF = `f.id, f.user_id, f.source_url, f.title, f.image_url, f.description, f.link, f.sync_mode, f.reupload_mode, f.refresh_secs, f.created_at, f.last_sync, f.last_error, f.fail_count, f.language`
 
 // ResolveFeedToken returns the feed for a token.
 func (db *DB) ResolveFeedToken(token string) (*Feed, error) {

@@ -27,7 +27,7 @@ Or with `compose.yaml` (see the file for all options): `docker compose up -d`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `PA_SECRET_KEY` | — (required) | ≥32 chars, signs session cookies. `openssl rand -hex 32` |
+| `PA_SECRET_KEY` | — (required) | ≥32 chars; encrypts stored refresh tokens. `openssl rand -hex 32` |
 | `PA_EXTERNAL_URL` | `http://localhost:8080` | Public base URL; used to build feed/media URLs |
 | `PA_LISTEN_ADDR` | `:8080` | Listen address |
 | `PUID` / `PGID` | `1000` / `1000` | Run the process as this UID/GID (Unraid convention; match your `/data` share ownership) |
@@ -36,8 +36,16 @@ Or with `compose.yaml` (see the file for all options): `docker compose up -d`.
 | `PA_MEDIA_DIR` | `<PA_DATA_DIR>/media` | Downloaded episode files — point this at a separate bind mount to keep the (large) media archive off your DB volume |
 | `PA_SYNC_INTERVAL` | `6h` | Feed refresh interval (min `1m`) |
 | `PA_MAX_EPISODE_BYTES` | `1073741824` | Hard size cap per episode file |
+| `PA_MAX_FEED_BYTES` | `134217728` | Size cap for a fetched feed document (128 MiB) |
+| `PA_MAX_FEEDS_PER_USER` | `100` | Default feed limit per user (`0` = unlimited); admins can override per user |
+| `PA_SYNC_WORKERS` | `3` | Feeds synced in parallel (1–32); manual "Sync now" requests go first |
+| `PA_SSRF_ALLOW_PRIVATE` | `false` | Development only: allow feeds and downloads from private/loopback addresses |
+| `PA_CHOWN_RECURSIVE` | `false` | Container: always `chown -R` the data/media dirs at start (by default only when the directory owner is wrong) |
 | `PA_OIDC_ISSUER` | — (unset = single-user mode) | Authentik provider URL, e.g. `https://auth.example.com/application/o/podcast-archiver/` |
-| `PA_OIDC_CLIENT_ID` / `PA_OIDC_CLIENT_SECRET` | — | OIDC client credentials (required when issuer is set) |
+| `PA_OIDC_CLIENT_ID` / `PA_OIDC_CLIENT_SECRET` | — | OIDC client credentials (both required when issuer is set) |
+| `PA_OIDC_SCOPES` | `openid profile email` | Space-separated scopes. Add `offline_access` to enable group re-checks during a session |
+| `PA_OIDC_RECHECK_INTERVAL` | `15m` | With a refresh token: how often group/admin membership is re-checked (`0` = only at login) |
+| `PA_SESSION_TTL` | `168h` | Session lifetime (min `1h`) |
 | `PA_OIDC_REDIRECT_URL` | `<external>/auth/callback` | Override if your proxy path differs |
 | `PA_OIDC_ALLOWED_GROUPS` | — (all users) | Comma-separated group allowlist; users outside these groups are denied login |
 | `PA_OIDC_ADMIN_GROUPS` | — (no admins) | Comma-separated groups whose members get admin rights |
@@ -53,7 +61,7 @@ Or with `compose.yaml` (see the file for all options): `docker compose up -d`.
 5. Set `PA_OIDC_ALLOWED_GROUPS=podcast-users` and `PA_OIDC_ADMIN_GROUPS=podcast-admins`.
 6. Copy the client ID/secret into the environment variables above.
 
-Users outside the allowed groups get a 403 at login. Admin rights sync from the `groups` claim on every login: leaving the admin group in Authentik revokes admin on next sign-in.
+Users outside the allowed groups get a 403 at login. Admin rights sync from the `groups` claim on every login. To apply group changes during a session too, add `offline_access` to `PA_OIDC_SCOPES` (and the `offline_access` scope mapping to the Authentik provider): the app then refreshes the token every `PA_OIDC_RECHECK_INTERVAL`, ends the session when the refresh is refused or the user left the allowed groups, and updates admin rights. If Authentik is unreachable, sessions are kept and checked again later. Without a refresh token, changes apply at the next login (at most `PA_SESSION_TTL`).
 
 ### Admin section
 
@@ -67,8 +75,10 @@ Feed URLs for podcast apps use tokens instead of OIDC: open a feed in the web UI
 
 ## Security notes
 
-- Outbound fetches are SSRF-guarded: only public HTTP(S) hosts are allowed (private, loopback, and link-local ranges blocked; redirects re-validated).
-- Session cookies are HMAC-signed, HttpOnly, and Secure when `PA_EXTERNAL_URL` is https.
+- Outbound fetches are SSRF-guarded: only public HTTP(S) hosts are allowed. The check runs on the address actually dialed (so DNS rebinding can't bypass it) and blocks private, loopback, link-local, CGNAT (`100.64.0.0/10`), NAT64 and other special-purpose ranges, for feeds, redirects, downloads and OPML imports.
+- Sessions are stored server-side (the cookie holds a random token); signing out or deleting a user ends them immediately. The cookie is HttpOnly, SameSite=Lax and Secure when `PA_EXTERNAL_URL` is https. Login uses PKCE.
+- Cross-site form posts are rejected (`Sec-Fetch-Site`/`Origin` check), in single-user mode too.
+- Mirror mode never deletes when the source lists no episodes or drops more than half of an archive of 10+ episodes at once (a `mirror_skipped` event is logged), and only deletes an episode after it has been missing for 3 consecutive syncs.
 - Run behind a TLS-terminating reverse proxy; never expose the container directly.
 
 ## Versioned images

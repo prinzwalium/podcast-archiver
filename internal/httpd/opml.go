@@ -77,6 +77,7 @@ func (h *Handler) importOPML(w http.ResponseWriter, r *http.Request, u *store.Us
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
+	limit := h.engine.FeedLimit(u)
 	existing := map[string]bool{}
 	for _, f := range feeds {
 		existing[f.SourceURL] = true
@@ -93,9 +94,13 @@ func (h *Handler) importOPML(w http.ResponseWriter, r *http.Request, u *store.Us
 			dupes++
 			continue
 		}
-		if len(feeds)+added >= h.cfg.MaxFeedsPerUser {
+		if limit > 0 && len(feeds)+added >= limit {
 			http.Error(w, "feed limit reached", http.StatusTooManyRequests)
 			return
+		}
+		if err := h.engine.ValidateURL(url); err != nil {
+			failed++
+			continue
 		}
 		if _, err := h.db.CreateFeed(u.ID, url, o.Text, "", "", "", "mirror", "replace"); err != nil {
 			failed++
@@ -104,7 +109,7 @@ func (h *Handler) importOPML(w http.ResponseWriter, r *http.Request, u *store.Us
 		added++
 		existing[url] = true
 	}
-	http.Redirect(w, r, "/?imported="+strconv.Itoa(added), http.StatusFound)
+	http.Redirect(w, r, "/?imported="+strconv.Itoa(added)+"&skipped="+strconv.Itoa(failed), http.StatusFound)
 }
 
 func (h *Handler) pinEpisode(w http.ResponseWriter, r *http.Request, u *store.User) {

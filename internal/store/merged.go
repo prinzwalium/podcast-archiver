@@ -217,8 +217,8 @@ func (db *DB) ListEpisodesForFeeds(feedIDs []int64) ([]*Episode, error) {
 	if len(feedIDs) == 0 {
 		return nil, nil
 	}
-	q, args := sqlInInt64(`SELECT `+episodeCols+` FROM episodes WHERE downloaded = 1 AND feed_id IN (`, feedIDs)
-	rows, err := db.Query(q+`) ORDER BY published DESC`, args...)
+	q, args := sqlInInt64(episodeSelect+` WHERE e.downloaded = 1 AND e.feed_id IN (`, feedIDs)
+	rows, err := db.Query(q+`) ORDER BY e.published DESC`, args...)
 	if err != nil {
 		return nil, err
 	}

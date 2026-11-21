@@ -22,11 +22,24 @@ fi
 
 # Ensure the data and media dirs are writable by the runtime user before
 # dropping privileges. PA_MEDIA_DIR may point at a separate bind mount.
-mkdir -p "$PA_DATA_DIR" 2>/dev/null || true
-chown -R "$PUID:$PGID" "$PA_DATA_DIR" 2>/dev/null || true
+# A recursive chown over a large archive can take minutes (especially on
+# NFS/SMB), so it only runs when the directory itself has the wrong owner,
+# or always with PA_CHOWN_RECURSIVE=true.
+fix_owner() {
+    dir="$1"
+    if ! mkdir -p "$dir"; then
+        echo "warning: cannot create $dir" >&2
+        return 0
+    fi
+    if [ "${PA_CHOWN_RECURSIVE:-false}" = "true" ] || [ "$(stat -c '%u:%g' "$dir")" != "$PUID:$PGID" ]; then
+        echo "setting owner of $dir to $PUID:$PGID"
+        chown -R "$PUID:$PGID" "$dir" || echo "warning: chown -R $dir failed; files may not be writable" >&2
+    fi
+}
+
+fix_owner "$PA_DATA_DIR"
 if [ -n "${PA_MEDIA_DIR:-}" ]; then
-    mkdir -p "$PA_MEDIA_DIR" 2>/dev/null || true
-    chown -R "$PUID:$PGID" "$PA_MEDIA_DIR" 2>/dev/null || true
+    fix_owner "$PA_MEDIA_DIR"
 fi
 
 exec su-exec "$PUID:$PGID" /usr/local/bin/podcast-archiver

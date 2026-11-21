@@ -1,6 +1,7 @@
 package httpd
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -53,8 +54,9 @@ func (h *Handler) pageAdmin(w http.ResponseWriter, r *http.Request, admin *store
 		})
 	}
 	used, _ := h.db.StorageUsed()
+	failing, _ := h.db.RecentFailures(0)
 	h.render(w, http.StatusOK, "content-admin", admin, &pageData{
-		Title: "Admin", UserName: admin.Name, Users: views, StorageUsed: fmtBytes(used),
+		Title: "Admin", UserName: admin.Name, Users: views, StorageUsed: fmtBytes(used), FailingFeeds: failing,
 	})
 }
 
@@ -93,17 +95,13 @@ func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request, admin *stor
 		http.Error(w, "cannot delete yourself", http.StatusBadRequest)
 		return
 	}
-	shas, err := h.db.UserFileSHAs(id)
-	if err != nil {
+	if err := h.engine.DeleteUser(id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
 		http.Error(w, "delete failed", http.StatusInternalServerError)
 		return
-	}
-	if err := h.db.DeleteUser(id); err != nil {
-		http.Error(w, "delete failed", http.StatusInternalServerError)
-		return
-	}
-	for _, sha := range shas {
-		h.engine.UnrefFile(sha)
 	}
 	http.Redirect(w, r, "/admin", http.StatusFound)
 }

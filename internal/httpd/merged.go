@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/prinzwalium/podcast-archiver/internal/auth"
 	"github.com/prinzwalium/podcast-archiver/internal/store"
@@ -206,65 +205,33 @@ func (h *Handler) mergedRSS(w http.ResponseWriter, m *store.MergedFeed, token st
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
-	// Feed titles per member id for per-item author/GUID namespacing.
+	// Source feed titles, for per-item authors so mixed shows stay
+	// distinguishable in podcatchers.
 	titles := map[int64]string{}
-	for _, fid := range memberIDs {
-		feeds, err := h.db.ListAllFeeds()
-		if err == nil {
-			for _, f := range feeds {
-				if f.ID == fid {
-					titles[fid] = f.Title
-				}
-			}
+	if feeds, err := h.db.ListFeeds(m.UserID); err == nil {
+		for _, f := range feeds {
+			titles[f.ID] = f.Title
 		}
 	}
 
 	base := strings.TrimRight(h.cfg.ExternalURL, "/")
-	feedURL := fmt.Sprintf("%s/mfeed/%s", base, token)
-
-	var items strings.Builder
+	var items []rssItem
 	for _, ep := range episodes {
-		if !ep.Downloaded || ep.FileSHA == "" {
+		if !ep.Downloaded || ep.FileMime == "" {
 			continue
-		}
-		file, err := h.db.GetFile(ep.FileSHA)
-		if err != nil {
-			continue
-		}
-		mediaURL := fmt.Sprintf("%s/media/%s/%s", base, token, ep.FileSHA+file.Ext)
-		pub := ""
-		if ep.Published > 0 {
-			pub = time.Unix(ep.Published, 0).UTC().Format(time.RFC1123Z)
 		}
 		// GUIDs must be namespaced per source feed: different shows can
 		// collide on their (lazy) GUIDs and podcatchers would dedupe them.
-		guid := fmt.Sprintf("pa-%d-%s", ep.FeedID, ep.GUID)
-		items.WriteString(fmt.Sprintf(itemXML,
-			xmlEscape(ep.Title),
-			xmlEscape(guid),
-			pub,
-			cdata(ep.Description),
-			xmlEscape(mediaURL),
-			file.Size,
-			xmlEscape(ep.MimeType),
-			ep.DurationSecs,
-		))
+		it := h.episodeItem(ep, token, fmt.Sprintf("pa-%d-%s", ep.FeedID, ep.GUID))
+		it.Author = titles[ep.FeedID]
+		items = append(items, it)
 	}
-
-	// The per-item author comes from the source feed title; podcatchers
-	// display it next to the episode so mixed shows stay distinguishable.
-	// The item template doesn't emit an author element; we set the channel
-	// author to the merged feed name.
-	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
-	fmt.Fprintf(w, rssXML,
-		xmlEscape(m.Name),
-		xmlEscape(base+"/"),
-		xmlEscape("Merged feed from podcast-archiver"),
-		"de",
-		"",
-		xmlEscape(m.Name),
-		xmlEscape(fmt.Sprintf("Union of %d archived podcasts", len(memberIDs))),
-		items.String(),
-	)
-	_ = feedURL
+	writeRSS(w, rssChannel{
+		Title:       m.Name,
+		Link:        base + "/",
+		Description: "Merged feed from podcast-archiver",
+		Author:      m.Name,
+		Summary:     fmt.Sprintf("Union of %d archived podcasts", len(memberIDs)),
+		SelfURL:     fmt.Sprintf("%s/mfeed/%s", base, token),
+	}, items)
 }

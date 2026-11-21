@@ -104,7 +104,7 @@ func (h *Handler) pageFeeds(w http.ResponseWriter, r *http.Request, u *store.Use
 		return
 	}
 	used, _ := h.db.StorageUsed()
-	failing, _ := h.db.RecentFailures()
+	failing, _ := h.db.RecentFailures(u.ID)
 	h.render(w, http.StatusOK, "content-feeds", u, &pageData{
 		Title:        "Feeds",
 		UserName:     u.Name,
@@ -168,13 +168,7 @@ func (h *Handler) pageFeedDetail(w http.ResponseWriter, r *http.Request, u *stor
 	}
 	var views []*episodeView
 	for _, e := range episodes {
-		size := int64(0)
-		if e.Downloaded && e.FileSHA != "" {
-			if file, err := h.db.GetFile(e.FileSHA); err == nil {
-				size = file.Size
-			}
-		}
-		views = append(views, &episodeView{Title: e.Title, GUID: e.GUID, Downloaded: e.Downloaded, Pinned: e.Pinned, FileBytesFmt: fmtBytes(size)})
+		views = append(views, &episodeView{Title: e.Title, GUID: e.GUID, Downloaded: e.Downloaded, Pinned: e.Pinned, FileBytesFmt: fmtBytes(e.FileSize)})
 	}
 	h.render(w, http.StatusOK, "content-feed", u, &pageData{
 		Title:    feed.Title,
