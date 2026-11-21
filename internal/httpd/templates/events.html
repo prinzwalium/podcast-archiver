@@ -1,6 +1,6 @@
 {{define "content-events"}}{{template "head" .}}
 <div class="card">
-  <h2 style="margin-top:0">Sync activity · {{.Feed.Title}}</h2>
+  <h2 style="margin-top:0">Sync activity · {{if .Feed.Title}}{{.Feed.Title}}{{else}}{{.Feed.SourceURL}}{{end}}</h2>
   <p><a href="/feeds/{{.Feed.ID}}">← back to feed</a></p>
   {{if not .Events}}<p class="muted">No events recorded yet.</p>{{end}}
   <table>

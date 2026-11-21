@@ -170,8 +170,12 @@ func (h *Handler) pageFeedDetail(w http.ResponseWriter, r *http.Request, u *stor
 	for _, e := range episodes {
 		views = append(views, &episodeView{Title: e.Title, GUID: e.GUID, Downloaded: e.Downloaded, Pinned: e.Pinned, FileBytesFmt: fmtBytes(e.FileSize)})
 	}
+	title := feed.Title
+	if title == "" {
+		title = feed.SourceURL
+	}
 	h.render(w, http.StatusOK, "content-feed", u, &pageData{
-		Title:    feed.Title,
+		Title:    title,
 		UserName: u.Name,
 		Feed:     feed,
 		Episodes: views,
