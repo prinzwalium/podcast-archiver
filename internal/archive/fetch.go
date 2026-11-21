@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,12 +24,23 @@ const UserAgent = "podcast-archiver/1.0 (+https://github.com/prinzwalium/podcast
 
 var ErrForbiddenHost = errors.New("host is not allowed (private or non-public network)")
 
+var ErrFeedTooLarge = errors.New("feed too large")
+
 type Fetcher struct {
-	client *http.Client
+	client       *http.Client
+	allowPrivate bool
+	maxFeedBytes int64
+	feedSlots    chan struct{} // bounds concurrent feed downloads+parses (memory)
 }
 
-func NewHTTPClient() *http.Client {
+// NewHTTPClient returns the client for all outbound fetches. Unless
+// allowPrivate is set, every connection is checked against IsPublicAddr at
+// dial time.
+func NewHTTPClient(allowPrivate bool) *http.Client {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	if !allowPrivate {
+		dialer.Control = dialControl
+	}
 	transport := &http.Transport{
 		DialContext:         dialer.DialContext,
 		MaxIdleConns:        20,
@@ -38,21 +50,29 @@ func NewHTTPClient() *http.Client {
 	return &http.Client{Transport: transport}
 }
 
-func NewFetcher(client *http.Client) *Fetcher {
-	f := &Fetcher{client: client}
+// NewFetcher wraps client. maxFeedBytes caps a feed document; at most
+// maxConcurrentFeeds feeds are fetched and parsed at once.
+func NewFetcher(client *http.Client, allowPrivate bool, maxFeedBytes int64) *Fetcher {
+	f := &Fetcher{client: client, allowPrivate: allowPrivate, maxFeedBytes: maxFeedBytes,
+		feedSlots: make(chan struct{}, maxConcurrentFeeds)}
 	f.client.CheckRedirect = f.checkRedirect
 	return f
 }
+
+const maxConcurrentFeeds = 4
 
 func (f *Fetcher) checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 5 {
 		return errors.New("stopped after 5 redirects")
 	}
-	return ValidateURL(req.URL.String())
+	return ValidateURL(req.URL.String(), f.allowPrivate)
 }
 
-// ValidateURL blocks non-HTTP schemes and private/loopback/link-local targets.
-func ValidateURL(raw string) error {
+// ValidateURL blocks non-HTTP schemes and hosts that resolve to non-public
+// addresses, for early, readable errors. The dialer re-checks every
+// connection, so this is not the only line of defence. allowPrivate skips
+// the address checks (development only).
+func ValidateURL(raw string, allowPrivate bool) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return err
@@ -61,29 +81,68 @@ func ValidateURL(raw string) error {
 		return fmt.Errorf("scheme %q not allowed", u.Scheme)
 	}
 	host := u.Hostname()
+	if host == "" {
+		return errors.New("missing host")
+	}
+	if allowPrivate {
+		return nil
+	}
 	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") {
 		return ErrForbiddenHost
 	}
-	ips, err := net.LookupIP(host)
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if !IsPublicAddr(addr) {
+			return ErrForbiddenHost
+		}
+		return nil
+	}
+	addrs, err := net.DefaultResolver.LookupNetIP(context.Background(), "ip", host)
 	if err != nil {
 		return fmt.Errorf("DNS lookup failed for %s: %w", host, err)
 	}
-	if len(ips) == 0 {
+	if len(addrs) == 0 {
 		return ErrForbiddenHost
 	}
-	for _, ip := range ips {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-			ip.IsInterfaceLocalMulticast() || ip.IsUnspecified() || !ip.IsGlobalUnicast() {
+	for _, a := range addrs {
+		if !IsPublicAddr(a) {
 			return ErrForbiddenHost
 		}
 	}
 	return nil
 }
 
+// limitedReader returns ErrFeedTooLarge instead of a silent EOF once more
+// than n bytes were read, so a truncated feed is never parsed as complete.
+type limitedReader struct {
+	r io.Reader
+	n int64
+}
+
+func (l *limitedReader) Read(p []byte) (int, error) {
+	if l.n < 0 {
+		return 0, ErrFeedTooLarge
+	}
+	if int64(len(p)) > l.n+1 {
+		p = p[:l.n+1]
+	}
+	n, err := l.r.Read(p)
+	l.n -= int64(n)
+	if l.n < 0 {
+		return n, ErrFeedTooLarge
+	}
+	return n, err
+}
+
 // FetchFeed fetches and parses a podcast RSS/Atom feed.
 func (f *Fetcher) FetchFeed(ctx context.Context, rawURL string) (*gofeed.Feed, error) {
-	if err := ValidateURL(rawURL); err != nil {
+	if err := ValidateURL(rawURL, f.allowPrivate); err != nil {
 		return nil, err
+	}
+	select {
+	case f.feedSlots <- struct{}{}:
+		defer func() { <-f.feedSlots }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 	// Big feeds take a while to transfer; the timeout covers DNS + connect +
 	// full body download.
@@ -103,18 +162,15 @@ func (f *Fetcher) FetchFeed(ctx context.Context, rawURL string) (*gofeed.Feed, e
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("feed fetch: status %d", resp.StatusCode)
 	}
-	// Large archives legitimately have very big feeds (100+ MB with full
-	// back-catalogs); cap at a generous 256 MB and surface a clear error
-	// when exceeded instead of a confusing truncated-XML parse error.
-	const maxFeedBytes = 256 << 20
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFeedBytes+1))
-	if err != nil {
-		return nil, err
+	if resp.ContentLength > f.maxFeedBytes {
+		return nil, fmt.Errorf("%w: exceeds PA_MAX_FEED_BYTES (%d MB)", ErrFeedTooLarge, f.maxFeedBytes>>20)
 	}
-	if int64(len(body)) > maxFeedBytes {
-		return nil, fmt.Errorf("feed exceeds maximum size of %d MB", maxFeedBytes>>20)
+	// Parse while streaming instead of buffering the whole document first.
+	feed, err := gofeed.NewParser().Parse(&limitedReader{r: resp.Body, n: f.maxFeedBytes})
+	if errors.Is(err, ErrFeedTooLarge) {
+		return nil, fmt.Errorf("%w: exceeds PA_MAX_FEED_BYTES (%d MB)", ErrFeedTooLarge, f.maxFeedBytes>>20)
 	}
-	return gofeed.NewParser().ParseString(string(body))
+	return feed, err
 }
 
 // FeedPrediction estimates archive size and episode count before adding a feed.
@@ -164,7 +220,7 @@ func (p *progressReader) Read(b []byte) (int, error) {
 // DownloadHashed streams an episode to destPath while computing its SHA-256,
 // enforcing a hard size cap. Returns (sha256, bytesWritten).
 func (f *Fetcher) DownloadHashed(ctx context.Context, rawURL, destPath string, maxBytes int64) (string, int64, error) {
-	if err := ValidateURL(rawURL); err != nil {
+	if err := ValidateURL(rawURL, f.allowPrivate); err != nil {
 		return "", 0, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)

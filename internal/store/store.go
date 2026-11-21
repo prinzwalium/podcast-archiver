@@ -61,6 +61,7 @@ func migrate(db *sql.DB) error {
 			last_error TEXT NOT NULL DEFAULT '',
 			refresh_secs INTEGER NOT NULL DEFAULT 0,
 			fail_count INTEGER NOT NULL DEFAULT 0,
+			language TEXT NOT NULL DEFAULT '',
 			CONSTRAINT uq_user_feed UNIQUE (user_id, source_url)
 		)`,
 		`CREATE TABLE IF NOT EXISTS episodes (
@@ -78,6 +79,7 @@ func migrate(db *sql.DB) error {
 			file_sha TEXT NOT NULL DEFAULT '',
 			downloaded INTEGER NOT NULL DEFAULT 0,
 			pinned INTEGER NOT NULL DEFAULT 0,
+			missing_syncs INTEGER NOT NULL DEFAULT 0,
 			CONSTRAINT uq_feed_guid UNIQUE (feed_id, guid)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_episodes_feed ON episodes(feed_id, published DESC)`,
@@ -113,6 +115,14 @@ func migrate(db *sql.DB) error {
 			feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
 			PRIMARY KEY (merged_id, feed_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS sessions (
+			token_hash TEXT PRIMARY KEY,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			checked_at INTEGER NOT NULL,
+			refresh_token TEXT NOT NULL DEFAULT ''
+		)`,
 		`CREATE TABLE IF NOT EXISTS merged_tokens (
 			id INTEGER PRIMARY KEY,
 			merged_id INTEGER NOT NULL REFERENCES merged_feeds(id) ON DELETE CASCADE,
@@ -137,16 +147,24 @@ func migrate(db *sql.DB) error {
 		{"users", "max_feeds", "ALTER TABLE users ADD COLUMN max_feeds INTEGER NOT NULL DEFAULT 0"},
 		{"users", "max_bytes", "ALTER TABLE users ADD COLUMN max_bytes INTEGER NOT NULL DEFAULT 0"},
 		{"users", "is_admin", "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"},
+		{"feeds", "language", "ALTER TABLE feeds ADD COLUMN language TEXT NOT NULL DEFAULT ''"},
+		{"episodes", "missing_syncs", "ALTER TABLE episodes ADD COLUMN missing_syncs INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, a := range additive {
 		var ck string
-		if err := db.QueryRow(`SELECT name FROM pragma_table_info(?) WHERE name = ?`, a.table, a.col).Scan(&ck); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				if _, err := db.Exec(a.ddl); err != nil {
-					return fmt.Errorf("%w: %s", err, a.ddl)
-				}
+		err := db.QueryRow(`SELECT name FROM pragma_table_info(?) WHERE name = ?`, a.table, a.col).Scan(&ck)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			if _, err := db.Exec(a.ddl); err != nil {
+				return fmt.Errorf("%w: %s", err, a.ddl)
 			}
+		case err != nil:
+			return fmt.Errorf("inspect %s.%s: %w", a.table, a.col, err)
 		}
+	}
+	// Indexes on columns that older databases only get from the additive step.
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_episodes_file ON episodes(file_sha)`); err != nil {
+		return err
 	}
 	return nil
 }

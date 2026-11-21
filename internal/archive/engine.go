@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mmcdole/gofeed"
@@ -21,48 +22,101 @@ type Engine struct {
 	db      *store.DB
 	fetcher *Fetcher
 	cfg     *config.Config
+
+	mu    sync.Mutex
+	feeds map[int64]*feedState
+
+	// objMu serializes changes to the object store with the refcount
+	// updates that justify them: a file must not be removed between a
+	// concurrent download finding it (dedup) and attaching to it.
+	objMu sync.Mutex
+}
+
+// feedState serializes work on one feed. cancel aborts the running sync
+// (used when the feed is deleted).
+type feedState struct {
+	mu     sync.Mutex
+	cancel context.CancelFunc
 }
 
 func NewEngine(db *store.DB, fetcher *Fetcher, cfg *config.Config) *Engine {
-	return &Engine{db: db, fetcher: fetcher, cfg: cfg}
+	return &Engine{db: db, fetcher: fetcher, cfg: cfg, feeds: map[int64]*feedState{}}
+}
+
+func (e *Engine) feedState(id int64) *feedState {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	st, ok := e.feeds[id]
+	if !ok {
+		st = &feedState{}
+		e.feeds[id] = st
+	}
+	return st
+}
+
+// lockFeedForDelete cancels a running sync of the feed and waits for it.
+func (e *Engine) lockFeedForDelete(id int64) *feedState {
+	st := e.feedState(id)
+	e.mu.Lock()
+	if st.cancel != nil {
+		st.cancel()
+	}
+	e.mu.Unlock()
+	st.mu.Lock()
+	return st
 }
 
 var unsafeFilename = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
 var ErrBudgetExceeded = errors.New("storage budget exceeded")
 
+// mirrorGraceSyncs is how many consecutive syncs an episode must be missing
+// from the source before mirror mode deletes it.
+const mirrorGraceSyncs = 3
+
 // budgetAllows checks the global storage cap and the per-user quota before
-// downloading an episode of the given size.
-func (e *Engine) budgetAllows(userID int64, episodeBytes int64) error {
+// adding globalBytes to the object store and userBytes to the user's usage.
+func (e *Engine) budgetAllows(userID, globalBytes, userBytes int64) error {
 	if e.cfg.MaxStorageBytes > 0 {
 		used, err := e.db.StorageUsed()
 		if err != nil {
 			return err
 		}
-		if used+episodeBytes > e.cfg.MaxStorageBytes {
+		if used+globalBytes > e.cfg.MaxStorageBytes {
 			return fmt.Errorf("%w: global", ErrBudgetExceeded)
 		}
 	}
-	if e.cfg.DefaultUserMaxBytes > 0 || true {
-		user, err := e.db.GetUserByID(userID)
+	user, err := e.db.GetUserByID(userID)
+	if err != nil {
+		return err
+	}
+	quota := user.MaxBytes
+	if quota == 0 {
+		quota = e.cfg.DefaultUserMaxBytes
+	}
+	if quota > 0 {
+		used, err := e.db.UserStorageBytes(userID)
 		if err != nil {
 			return err
 		}
-		quota := user.MaxBytes
-		if quota == 0 {
-			quota = e.cfg.DefaultUserMaxBytes
-		}
-		if quota > 0 {
-			used, err := e.db.UserStorageBytes(userID)
-			if err != nil {
-				return err
-			}
-			if used+episodeBytes > quota {
-				return fmt.Errorf("%w: user quota", ErrBudgetExceeded)
-			}
+		if used+userBytes > quota {
+			return fmt.Errorf("%w: user quota", ErrBudgetExceeded)
 		}
 	}
 	return nil
+}
+
+// FeedLimit returns how many feeds the user may have; 0 = unlimited.
+func (e *Engine) FeedLimit(u *store.User) int {
+	if u.MaxFeeds > 0 {
+		return int(u.MaxFeeds)
+	}
+	return e.cfg.MaxFeedsPerUser
+}
+
+// ValidateURL checks a user-supplied feed URL against the SSRF policy.
+func (e *Engine) ValidateURL(raw string) error {
+	return ValidateURL(raw, e.cfg.SSRFAllowPrivate)
 }
 
 // ContentDir returns the root directory for content-addressed media files.
@@ -86,15 +140,30 @@ func enclosure(item *gofeed.Item) *gofeed.Enclosure {
 }
 
 // SyncFeed fetches the source feed, upserts episodes, applies the feed's sync
-// and reupload policies, and downloads missing media files.
+// and reupload policies, and downloads missing media files. Syncs of the
+// same feed never overlap.
 func (e *Engine) SyncFeed(ctx context.Context, feed *store.Feed) error {
+	st := e.feedState(feed.ID)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	e.mu.Lock()
+	st.cancel = cancel
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		st.cancel = nil
+		e.mu.Unlock()
+	}()
+
 	parsed, err := e.fetcher.FetchFeed(ctx, feed.SourceURL)
 	if err != nil {
 		_ = e.db.UpdateFeedSync(feed.ID, time.Now().Unix(), err.Error())
 		return err
 	}
 
-	if err := e.db.UpdateFeedMeta(feed.ID, parsed.Title, feedImage(parsed), feedDescription(parsed), parsed.Link); err != nil {
+	if err := e.db.UpdateFeedMeta(feed.ID, parsed.Title, feedImage(parsed), feedDescription(parsed), parsed.Link, parsed.Language); err != nil {
 		return err
 	}
 
@@ -123,19 +192,19 @@ func (e *Engine) SyncFeed(ctx context.Context, feed *store.Feed) error {
 			DurationSecs:   itunesDuration(item),
 			ImageURL:       itemImage(item),
 		}
-		isNew, enclosureChanged, err := e.db.UpsertEpisode(ep)
+		isNew, oldURL, oldBytes, err := e.db.UpsertEpisode(ep)
 		if err != nil {
 			slog.Warn("upsert episode failed", "feed", feed.ID, "guid", guid, "err", err)
 			continue
 		}
 		if isNew {
 			_ = e.db.AddEvent(feed.ID, "episode_added", ep.Title)
-		} else if enclosureChanged {
-			// Re-upload detected. "replace" clears the local file so the new
-			// version is downloaded; "keep" retains the local copy as-is.
+		} else if IsReupload(oldURL, ep.EnclosureURL, oldBytes, ep.EnclosureBytes) {
+			// "replace" clears the local file so the new version is
+			// downloaded; "keep" retains the local copy as-is.
 			if feed.KeepsReupload() {
 				slog.Info("enclosure changed, keeping local copy (reupload=keep)", "feed", feed.Title, "guid", guid)
-			} else if err := e.db.ClearEpisodeFile(feed.ID, guid); err != nil {
+			} else if err := e.clearEpisodeFile(feed.ID, guid); err != nil {
 				slog.Warn("clear episode file failed", "feed", feed.ID, "guid", guid, "err", err)
 			} else {
 				_ = e.db.AddEvent(feed.ID, "episode_replaced", ep.Title)
@@ -143,17 +212,9 @@ func (e *Engine) SyncFeed(ctx context.Context, feed *store.Feed) error {
 		}
 	}
 
-	// Mirror mode: delete local episodes the source removed (pins survive).
 	if feed.IsMirror() {
-		removed, shas, err := e.db.DeleteMissing(feed.ID, guids)
-		if err != nil {
+		if err := e.applyMirror(feed, guids); err != nil {
 			return err
-		}
-		for _, guid := range removed {
-			_ = e.db.AddEvent(feed.ID, "episode_removed", guid)
-		}
-		for _, sha := range shas {
-			e.unrefFile(sha)
 		}
 	}
 
@@ -163,12 +224,18 @@ func (e *Engine) SyncFeed(ctx context.Context, feed *store.Feed) error {
 		return err
 	}
 	for _, ep := range pending {
-		if err := e.budgetAllows(feed.UserID, ep.EnclosureBytes); err != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := e.budgetAllows(feed.UserID, ep.EnclosureBytes, ep.EnclosureBytes); err != nil {
 			slog.Warn("skipping download, storage budget exceeded", "feed", feed.ID, "guid", ep.GUID, "err", err)
 			_ = e.db.AddEvent(feed.ID, "budget_skipped", ep.Title)
 			continue
 		}
 		if err := e.downloadEpisode(ctx, feed, ep); err != nil {
+			if errors.Is(err, ErrBudgetExceeded) {
+				_ = e.db.AddEvent(feed.ID, "budget_skipped", ep.Title)
+			}
 			slog.Warn("episode download failed", "feed", feed.ID, "guid", ep.GUID, "err", err)
 		}
 	}
@@ -176,17 +243,63 @@ func (e *Engine) SyncFeed(ctx context.Context, feed *store.Feed) error {
 	return e.db.UpdateFeedSync(feed.ID, time.Now().Unix(), "")
 }
 
-// UnrefFile decrements a file's refcount and removes it from disk when it
-// drops to zero. Exported for admin operations.
-func (e *Engine) UnrefFile(sha string) { e.unrefFile(sha) }
-
-func (e *Engine) unrefFile(sha string) {
-	remove, err := e.db.FileUnref(sha)
-	if err != nil {
-		slog.Warn("file unref failed", "sha", sha, "err", err)
-		return
+// applyMirror deletes local episodes the source removed (pins survive).
+// It refuses when the source lists nothing or drops more than half of a
+// sizeable archive in one go, which usually means a broken or truncated
+// feed rather than real deletions; and an episode is only deleted after
+// it has been missing for mirrorGraceSyncs consecutive syncs.
+func (e *Engine) applyMirror(feed *store.Feed, guids []string) error {
+	if len(guids) == 0 {
+		_ = e.db.AddEvent(feed.ID, "mirror_skipped", "source lists no episodes; nothing deleted")
+		return nil
 	}
-	if remove {
+	existing, err := e.db.EpisodeGUIDs(feed.ID)
+	if err != nil {
+		return err
+	}
+	listed := make(map[string]bool, len(guids))
+	for _, g := range guids {
+		listed[g] = true
+	}
+	missing := 0
+	for _, g := range existing {
+		if !listed[g] {
+			missing++
+		}
+	}
+	if len(existing) >= 10 && missing*2 > len(existing) {
+		_ = e.db.AddEvent(feed.ID, "mirror_skipped",
+			fmt.Sprintf("%d of %d episodes missing from source; nothing deleted (switch to archive mode or pin episodes to keep them)", missing, len(existing)))
+		return nil
+	}
+	e.objMu.Lock()
+	defer e.objMu.Unlock()
+	removed, removable, err := e.db.DeleteMissing(feed.ID, guids, mirrorGraceSyncs)
+	if err != nil {
+		return err
+	}
+	e.removeObjectsLocked(removable)
+	for _, guid := range removed {
+		_ = e.db.AddEvent(feed.ID, "episode_removed", guid)
+	}
+	return nil
+}
+
+func (e *Engine) clearEpisodeFile(feedID int64, guid string) error {
+	e.objMu.Lock()
+	defer e.objMu.Unlock()
+	removable, err := e.db.ClearEpisodeFile(feedID, guid)
+	if err != nil {
+		return err
+	}
+	e.removeObjectsLocked(removable)
+	return nil
+}
+
+// removeObjectsLocked deletes stored objects whose last reference is gone.
+// The caller holds objMu.
+func (e *Engine) removeObjectsLocked(shas []string) {
+	for _, sha := range shas {
 		if err := os.Remove(e.objectPath(sha)); err != nil && !os.IsNotExist(err) {
 			slog.Warn("file removal failed", "sha", sha, "err", err)
 		}
@@ -198,46 +311,104 @@ func (e *Engine) downloadEpisode(ctx context.Context, feed *store.Feed, ep *stor
 
 	// Stream to a temp file while hashing; on success, rename into the
 	// content-addressed store, which deduplicates across feeds and users.
-	tmp, err := os.CreateTemp(e.ContentDir(), "dl-*")
-	if err != nil {
-		if err := os.MkdirAll(e.ContentDir(), 0o755); err != nil {
-			return err
-		}
-		tmp, err = os.CreateTemp(e.ContentDir(), "dl-*")
-		if err != nil {
-			return err
-		}
+	if err := os.MkdirAll(e.ContentDir(), 0o755); err != nil {
+		return err
 	}
-	defer os.Remove(tmp.Name())
+	tmp, err := os.CreateTemp(e.ContentDir(), tempPrefix+"*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	_ = tmp.Close()
+	defer os.Remove(tmpName)
 
-	sha, size, err := e.fetcher.DownloadHashed(ctx, ep.EnclosureURL, tmp.Name(), e.cfg.MaxEpisodeBytes)
+	sha, size, err := e.fetcher.DownloadHashed(ctx, ep.EnclosureURL, tmpName, e.cfg.MaxEpisodeBytes)
 	if err != nil {
 		return err
 	}
 
+	e.objMu.Lock()
+	defer e.objMu.Unlock()
 	dest := e.objectPath(sha)
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+	_, statErr := os.Stat(dest)
+	isNewObject := statErr != nil
+	// Declared enclosure lengths are often missing or wrong; enforce the
+	// budget again with the real size.
+	globalBytes := size
+	if !isNewObject {
+		globalBytes = 0
+	}
+	if err := e.budgetAllows(feed.UserID, globalBytes, size); err != nil {
 		return err
 	}
-	if _, err := os.Stat(dest); err == nil {
-		// Already stored (deduplicated); drop the temp copy.
-		if err := tmp.Close(); err != nil {
+	if isNewObject {
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			return err
 		}
-		slog.Info("episode already stored, deduplicated", "feed", feed.Title, "sha", sha[:12])
+		if err := os.Rename(tmpName, dest); err != nil {
+			return err
+		}
 	} else {
-		if err := tmp.Close(); err != nil {
-			return err
-		}
-		if err := os.Rename(tmp.Name(), dest); err != nil {
-			return err
-		}
+		slog.Info("episode already stored, deduplicated", "feed", feed.Title, "sha", sha[:12])
 	}
 
-	if err := e.db.FileRef(sha, size, ep.MimeType, mediaExt(ep.EnclosureURL, ep.MimeType)); err != nil {
+	if err := e.db.AttachFile(ep.ID, sha, size, ep.MimeType, mediaExt(ep.EnclosureURL, ep.MimeType)); err != nil {
+		if isNewObject {
+			if known, _ := e.db.FileExists(sha); !known {
+				_ = os.Remove(dest)
+			}
+		}
 		return err
 	}
-	return e.db.MarkEpisodeDownloaded(ep, sha)
+	return nil
+}
+
+// tempPrefix names in-progress downloads in ContentDir.
+const tempPrefix = "dl-"
+
+// Maintain runs at startup before any sync: it removes temp files left by
+// interrupted downloads and repairs refcounts. Stored objects that the
+// database does not know about are only reported, never deleted, so a lost
+// or replaced database cannot wipe the media archive.
+func (e *Engine) Maintain() error {
+	if entries, err := os.ReadDir(e.ContentDir()); err == nil {
+		for _, ent := range entries {
+			if !ent.IsDir() && strings.HasPrefix(ent.Name(), tempPrefix) {
+				_ = os.Remove(filepath.Join(e.ContentDir(), ent.Name()))
+			}
+		}
+	}
+	e.objMu.Lock()
+	defer e.objMu.Unlock()
+	removable, err := e.db.RecomputeRefcounts()
+	if err != nil {
+		return err
+	}
+	e.removeObjectsLocked(removable)
+	if len(removable) > 0 {
+		slog.Info("removed unreferenced media files", "count", len(removable))
+	}
+	known, err := e.db.KnownFileSHAs()
+	if err != nil {
+		return err
+	}
+	untracked := 0
+	shards, _ := os.ReadDir(e.ContentDir())
+	for _, shard := range shards {
+		if !shard.IsDir() {
+			continue
+		}
+		objs, _ := os.ReadDir(filepath.Join(e.ContentDir(), shard.Name()))
+		for _, o := range objs {
+			if !known[o.Name()] {
+				untracked++
+			}
+		}
+	}
+	if untracked > 0 {
+		slog.Warn("media files not referenced by the database (left in place)", "count", untracked, "dir", e.ContentDir())
+	}
+	return nil
 }
 
 // PredictSize fetches the source feed and estimates total archive size.
@@ -245,20 +416,38 @@ func (e *Engine) PredictSize(ctx context.Context, rawURL string) (*FeedPredictio
 	return e.fetcher.FetchPrediction(ctx, rawURL)
 }
 
-// DeleteFeed removes all episodes and decrements file refcounts.
+// DeleteFeed cancels a running sync of the feed, removes all its episodes
+// and drops their file references.
 func (e *Engine) DeleteFeed(feed *store.Feed) error {
-	episodes, err := e.db.ListEpisodes(feed.ID)
+	st := e.lockFeedForDelete(feed.ID)
+	defer st.mu.Unlock()
+	e.objMu.Lock()
+	defer e.objMu.Unlock()
+	removable, err := e.db.DeleteFeed(feed.UserID, feed.ID)
 	if err != nil {
 		return err
 	}
-	if err := e.db.DeleteFeed(feed.UserID, feed.ID); err != nil {
+	e.removeObjectsLocked(removable)
+	return nil
+}
+
+// DeleteUser removes a user and everything they own.
+func (e *Engine) DeleteUser(userID int64) error {
+	feeds, err := e.db.ListFeeds(userID)
+	if err != nil {
 		return err
 	}
-	for _, ep := range episodes {
-		if ep.Downloaded && ep.FileSHA != "" {
-			e.unrefFile(ep.FileSHA)
-		}
+	for _, f := range feeds {
+		st := e.lockFeedForDelete(f.ID)
+		defer st.mu.Unlock()
 	}
+	e.objMu.Lock()
+	defer e.objMu.Unlock()
+	removable, err := e.db.DeleteUser(userID)
+	if err != nil {
+		return err
+	}
+	e.removeObjectsLocked(removable)
 	return nil
 }
 

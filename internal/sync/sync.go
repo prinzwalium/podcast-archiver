@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	stdsync "sync"
 	"time"
@@ -10,26 +11,36 @@ import (
 	"github.com/prinzwalium/podcast-archiver/internal/store"
 )
 
-// Service periodically syncs all feeds, respecting per-feed refresh intervals.
+// Service syncs feeds on a bounded worker pool: scheduled syncs when a feed's
+// refresh interval has elapsed, and manual "Sync now" requests, which workers
+// pick before scheduled ones. A feed is never queued or synced twice at once.
 type Service struct {
 	db       *store.DB
 	engine   *archive.Engine
 	interval time.Duration
-	syncing  chan struct{}
-	manual   chan *store.Feed
+	workers  int
+
+	manual    chan *store.Feed
+	scheduled chan *store.Feed
 
 	mu      stdsync.Mutex
-	running map[int64]bool // feed IDs currently being synced
+	queued  map[int64]bool
+	running map[int64]bool
 }
 
-func NewService(db *store.DB, engine *archive.Engine, interval time.Duration) *Service {
+func NewService(db *store.DB, engine *archive.Engine, interval time.Duration, workers int) *Service {
+	if workers < 1 {
+		workers = 1
+	}
 	return &Service{
-		db:       db,
-		engine:   engine,
-		interval: interval,
-		syncing:  make(chan struct{}, 1),
-		manual:   make(chan *store.Feed, 32),
-		running:  map[int64]bool{},
+		db:        db,
+		engine:    engine,
+		interval:  interval,
+		workers:   workers,
+		manual:    make(chan *store.Feed, 64),
+		scheduled: make(chan *store.Feed, 4096),
+		queued:    map[int64]bool{},
+		running:   map[int64]bool{},
 	}
 }
 
@@ -40,63 +51,96 @@ func (s *Service) IsSyncing(feedID int64) bool {
 	return s.running[feedID]
 }
 
-func (s *Service) setSyncing(feedID int64, on bool) {
+// enqueue adds the feed to ch unless it is already queued or running.
+func (s *Service) enqueue(feed *store.Feed, ch chan *store.Feed) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if on {
-		s.running[feedID] = true
-	} else {
-		delete(s.running, feedID)
+	if s.queued[feed.ID] || s.running[feed.ID] {
+		s.mu.Unlock()
+		return false
 	}
-}
-
-// syncFeed runs a single feed sync with running-state tracking.
-func (s *Service) syncFeed(ctx context.Context, feed *store.Feed) {
-	s.setSyncing(feed.ID, true)
-	defer s.setSyncing(feed.ID, false)
-	if err := s.engine.SyncFeed(ctx, feed); err != nil {
-		slog.Warn("sync failed", "feed", feed.Title, "err", err)
-	}
-}
-
-// QueueFeedAsync queues a manual sync request for a feed. It returns
-// immediately; the sync worker picks the request up asynchronously.
-func (s *Service) QueueFeedAsync(feed *store.Feed) {
+	s.queued[feed.ID] = true
+	s.mu.Unlock()
 	select {
-	case s.manual <- feed:
+	case ch <- feed:
+		return true
 	default:
-		// queue full: a sync for this feed is already pending upstream in
-		// the queue; drop the duplicate rather than blocking the request.
+		s.mu.Lock()
+		delete(s.queued, feed.ID)
+		s.mu.Unlock()
+		return false
 	}
 }
 
-// Run blocks until ctx is cancelled, checking for due feeds on a ticker
-// and processing queued manual sync requests.
+// QueueFeedAsync queues a manual sync request for a feed and returns
+// immediately. It is a no-op if the feed is already queued or syncing.
+func (s *Service) QueueFeedAsync(feed *store.Feed) {
+	s.enqueue(feed, s.manual)
+}
+
+// Run starts the workers and the scheduler and blocks until ctx is
+// cancelled and every running sync has returned.
 func (s *Service) Run(ctx context.Context) {
-	s.SyncDue(ctx)
+	var wg stdsync.WaitGroup
+	for range s.workers {
+		wg.Go(func() { s.worker(ctx) })
+	}
+	s.enqueueDue()
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			wg.Wait()
 			return
 		case <-t.C:
-			s.SyncDue(ctx)
-		case feed := <-s.manual:
-			s.syncFeed(ctx, feed)
+			s.enqueueDue()
 		}
 	}
 }
 
-// SyncDue syncs every feed whose refresh interval has elapsed. Feeds that have
-// never synced are always due.
-func (s *Service) SyncDue(ctx context.Context) {
-	select {
-	case s.syncing <- struct{}{}:
-		defer func() { <-s.syncing }()
-	default:
-		return // already syncing
+func (s *Service) worker(ctx context.Context) {
+	for {
+		var feed *store.Feed
+		select {
+		case feed = <-s.manual:
+		default:
+			select {
+			case <-ctx.Done():
+				return
+			case feed = <-s.manual:
+			case feed = <-s.scheduled:
+			}
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		s.syncFeed(ctx, feed)
 	}
+}
+
+func (s *Service) syncFeed(ctx context.Context, queued *store.Feed) {
+	s.mu.Lock()
+	delete(s.queued, queued.ID)
+	s.running[queued.ID] = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.running, queued.ID)
+		s.mu.Unlock()
+	}()
+	// Reload: the feed may have been deleted or reconfigured while queued.
+	feed, err := s.db.GetFeed(queued.UserID, queued.ID)
+	if err != nil {
+		return
+	}
+	if err := s.engine.SyncFeed(ctx, feed); err != nil && !errors.Is(err, context.Canceled) {
+		slog.Warn("sync failed", "feed", feed.Title, "err", err)
+	}
+}
+
+// enqueueDue queues every feed whose refresh interval has elapsed. Feeds
+// that have never synced are always due.
+func (s *Service) enqueueDue() {
 	feeds, err := s.db.ListAllFeeds()
 	if err != nil {
 		slog.Error("sync: list feeds", "err", err)
@@ -110,18 +154,6 @@ func (s *Service) SyncDue(ctx context.Context) {
 		if feed.LastSync > 0 && time.Since(time.Unix(feed.LastSync, 0)) < interval {
 			continue
 		}
-		s.syncFeed(ctx, feed)
-	}
-}
-
-// SyncAll syncs every feed regardless of due time.
-func (s *Service) SyncAll(ctx context.Context) {
-	feeds, err := s.db.ListAllFeeds()
-	if err != nil {
-		slog.Error("sync: list feeds", "err", err)
-		return
-	}
-	for _, feed := range feeds {
-		s.syncFeed(ctx, feed)
+		s.enqueue(feed, s.scheduled)
 	}
 }

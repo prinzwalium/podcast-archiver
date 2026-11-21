@@ -302,7 +302,7 @@ header .brand__sub { display: block; margin-top: 3px; font-size: 0.62rem; letter
     {{if .IsAdmin}}<a class="navlink" href="/admin">Admin</a>{{end}}
   </nav>
   <div>
-    {{if .UserName}}<span class="muted">{{.UserName}}</span> <a class="navlink" href="/logout">Sign out</a>{{end}}
+    {{if .UserName}}<span class="muted">{{.UserName}}</span> <form class="inline" method="POST" action="/auth/logout"><button type="submit" class="navlink">Sign out</button></form>{{end}}
   </div>
 </header>
 <main>

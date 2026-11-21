@@ -42,3 +42,17 @@ func TestToggleTrailingSlash(t *testing.T) {
 		}
 	}
 }
+
+func TestSealerRoundTrip(t *testing.T) {
+	s := newSealer("0123456789abcdef0123456789abcdef")
+	sealed, err := s.seal("refresh-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.open(sealed); err != nil || got != "refresh-token" {
+		t.Fatalf("open = %q, %v", got, err)
+	}
+	if _, err := newSealer("another-secret-another-secret-xx").open(sealed); err == nil {
+		t.Fatal("opened with the wrong key")
+	}
+}

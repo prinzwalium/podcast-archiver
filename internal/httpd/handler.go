@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	stdsync "sync"
+	"time"
 
 	"github.com/prinzwalium/podcast-archiver/internal/archive"
 	"github.com/prinzwalium/podcast-archiver/internal/auth"
@@ -22,6 +25,9 @@ type Handler struct {
 	cfg    *config.Config
 	auth   *auth.Service
 	syncer *sync.Service
+
+	// predicting marks users with a size prediction in flight (one each).
+	predicting stdsync.Map
 }
 
 func New(db *store.DB, engine *archive.Engine, cfg *config.Config, authSvc *auth.Service, syncer *sync.Service) *Handler {
@@ -77,8 +83,36 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/login", h.auth.Login)
 	mux.HandleFunc("GET /auth/callback", h.callback)
 	mux.HandleFunc("POST /auth/logout", h.logout)
+	mux.HandleFunc("GET /healthz", h.healthz)
 
-	return h.securityHeaders(mux)
+	return h.securityHeaders(h.crossOriginProtection(mux))
+}
+
+// crossOriginProtection rejects cross-site state-changing requests
+// (CSRF) using Sec-Fetch-Site / Origin, so protection doesn't rely on
+// SameSite cookies alone, which treat sibling subdomains as same-site
+// and do nothing in single-user mode. The configured external URL is
+// trusted in case a proxy rewrites Host.
+func (h *Handler) crossOriginProtection(next http.Handler) http.Handler {
+	cop := http.NewCrossOriginProtection()
+	if u, err := url.Parse(h.cfg.ExternalURL); err == nil && u.Scheme != "" && u.Host != "" {
+		if err := cop.AddTrustedOrigin(u.Scheme + "://" + u.Host); err != nil {
+			slog.Warn("PA_EXTERNAL_URL is not a valid origin", "err", err)
+		}
+	}
+	return cop.Handler(next)
+}
+
+func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	var one int
+	if err := h.db.QueryRowContext(ctx, `SELECT 1`).Scan(&one); err != nil {
+		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte("ok\n"))
 }
 
 func (h *Handler) securityHeaders(next http.Handler) http.Handler {
@@ -105,7 +139,7 @@ func (h *Handler) requireUser(next func(w http.ResponseWriter, r *http.Request, 
 			next(w, r, u)
 			return
 		}
-		u, err := h.auth.CurrentUser(r, h.db)
+		u, err := h.auth.CurrentUser(r)
 		if err != nil {
 			http.Redirect(w, r, "/auth/login", http.StatusFound)
 			return
@@ -119,25 +153,23 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
-	user, err := h.auth.Callback(w, r, h.db)
-	if err != nil {
+	if _, err := h.auth.Callback(w, r); err != nil {
 		slog.Warn("oidc callback failed", "err", err)
-		if errors.Is(err, auth.ErrGroupNotAllowed) {
+		switch {
+		case errors.Is(err, auth.ErrGroupNotAllowed):
 			http.Error(w, "access denied: you are not in an allowed group", http.StatusForbidden)
-			return
+		case errors.Is(err, auth.ErrProviderUnavailable):
+			http.Error(w, "identity provider unavailable, try again shortly", http.StatusServiceUnavailable)
+		default:
+			http.Error(w, "authentication failed", http.StatusUnauthorized)
 		}
-		http.Error(w, "authentication failed", http.StatusUnauthorized)
-		return
-	}
-	if err := h.auth.SetSessionCookie(w, user.ID); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
-	h.auth.Logout(w)
+	h.auth.Logout(w, r)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -181,37 +213,32 @@ func (h *Handler) addFeed(w http.ResponseWriter, r *http.Request, u *store.User)
 		http.Error(w, "url required", http.StatusBadRequest)
 		return
 	}
-	if err := archive.ValidateURL(rawURL); err != nil {
+	if err := h.engine.ValidateURL(rawURL); err != nil {
 		http.Error(w, "invalid or blocked URL: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	feeds, err := h.db.ListFeeds(u.ID)
-	if err == nil && len(feeds) >= h.cfg.MaxFeedsPerUser {
+	count, err := h.db.CountFeeds(u.ID)
+	if err != nil {
+		http.Error(w, "database error", http.StatusInternalServerError)
+		return
+	}
+	if limit := h.engine.FeedLimit(u); limit > 0 && count >= limit {
 		http.Error(w, "feed limit reached", http.StatusTooManyRequests)
 		return
 	}
-	// Fetch metadata for a sane title before creating.
-	pred, err := h.engine.PredictSize(r.Context(), rawURL)
-	title := ""
-	if err == nil {
-		title = pred.Title
-	}
 	syncMode := sanitizeMode(r.FormValue("sync_mode"), []string{"mirror", "archive"}, "mirror")
 	reuploadMode := sanitizeMode(r.FormValue("reupload_mode"), []string{"replace", "keep"}, "replace")
-	feed, err := h.db.CreateFeed(u.ID, rawURL, title, "", "", "", syncMode, reuploadMode)
+	// The title and metadata arrive with the first sync; the feed is not
+	// fetched here so the request stays fast and the feed is fetched once.
+	feed, err := h.db.CreateFeed(u.ID, rawURL, "", "", "", "", syncMode, reuploadMode)
 	if err != nil {
 		slog.Error("create feed", "err", err)
 		http.Error(w, "could not add feed (duplicate?)", http.StatusConflict)
 		return
 	}
-	// Initial sync in background so the request returns fast. Use a fresh
-	// context: the request's context is canceled as soon as the redirect
-	// is written, which would abort the sync mid-download.
-	go func() {
-		if err := h.engine.SyncFeed(context.Background(), feed); err != nil {
-			slog.Warn("initial sync failed", "feed", rawURL, "err", err)
-		}
-	}()
+	// The initial sync goes through the sync queue like every other sync,
+	// so it can't overlap a scheduled sync of the same feed.
+	h.syncer.QueueFeedAsync(feed)
 	http.Redirect(w, r, "/feeds/"+strconv.FormatInt(feed.ID, 10), http.StatusFound)
 }
 
@@ -335,6 +362,15 @@ func (h *Handler) predict(w http.ResponseWriter, r *http.Request, u *store.User)
 		http.Error(w, "url required", http.StatusBadRequest)
 		return
 	}
+	if err := h.engine.ValidateURL(rawURL); err != nil {
+		http.Error(w, "invalid or blocked URL: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, busy := h.predicting.LoadOrStore(u.ID, true); busy {
+		http.Error(w, "a size prediction is already running, try again when it is done", http.StatusTooManyRequests)
+		return
+	}
+	defer h.predicting.Delete(u.ID)
 	pred, err := h.engine.PredictSize(r.Context(), rawURL)
 	if err != nil {
 		http.Error(w, "could not fetch feed: "+err.Error(), http.StatusBadRequest)

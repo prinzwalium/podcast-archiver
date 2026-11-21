@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,9 +19,14 @@ type Config struct {
 	SyncInterval        time.Duration
 	MaxEpisodeBytes     int64
 	MaxStorageBytes     int64 // global disk budget; 0 = unlimited. Downloads pause when exceeded.
-	MaxFeedsPerUser     int
+	MaxFeedsPerUser     int   // default per-user feed limit; 0 = unlimited. Admins can override per user.
 	DefaultUserMaxBytes int64 // per-user quota default; 0 = unlimited
+	MaxFeedBytes        int64 // size cap for a fetched feed document
+	SyncWorkers         int   // feeds synced in parallel
 	SSRFAllowPrivate    bool  // dev only; never enable in production
+	SessionTTL          time.Duration
+	OIDCRecheck         time.Duration // how often to re-check group membership via refresh token; 0 = off
+	OIDCScopes          []string
 
 	// OIDC (Authentik). Empty Issuer disables auth (single-user local mode).
 	OIDCIssuer        string
@@ -41,7 +47,12 @@ func Load() (*Config, error) {
 		SyncInterval:     6 * time.Hour,
 		MaxEpisodeBytes:  1024 * 1024 * 1024, // 1 GiB per file
 		MaxFeedsPerUser:  100,
+		MaxFeedBytes:     128 << 20,
+		SyncWorkers:      3,
 		SSRFAllowPrivate: os.Getenv("PA_SSRF_ALLOW_PRIVATE") == "true",
+		SessionTTL:       7 * 24 * time.Hour,
+		OIDCRecheck:      15 * time.Minute,
+		OIDCScopes:       strings.Fields(getenv("PA_OIDC_SCOPES", "openid profile email")),
 
 		// Keep the issuer exactly as configured; go-oidc requires an exact
 		// match with the issuer in the provider's discovery document, and
@@ -81,6 +92,7 @@ func Load() (*Config, error) {
 	}{
 		{"PA_MAX_STORAGE_BYTES", &cfg.MaxStorageBytes},
 		{"PA_USER_MAX_BYTES", &cfg.DefaultUserMaxBytes},
+		{"PA_MAX_FEED_BYTES", &cfg.MaxFeedBytes},
 	} {
 		if v := os.Getenv(e.env); v != "" {
 			n, err := strconv.ParseInt(v, 10, 64)
@@ -91,9 +103,43 @@ func Load() (*Config, error) {
 		}
 	}
 
+	if cfg.MaxFeedBytes == 0 {
+		return nil, errors.New("PA_MAX_FEED_BYTES must be positive")
+	}
+	if v := os.Getenv("PA_MAX_FEEDS_PER_USER"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, errors.New("PA_MAX_FEEDS_PER_USER must be a non-negative integer")
+		}
+		cfg.MaxFeedsPerUser = n
+	}
+	if v := os.Getenv("PA_SYNC_WORKERS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 32 {
+			return nil, errors.New("PA_SYNC_WORKERS must be between 1 and 32")
+		}
+		cfg.SyncWorkers = n
+	}
+	for _, e := range []struct {
+		env string
+		dst *time.Duration
+		min time.Duration
+	}{
+		{"PA_SESSION_TTL", &cfg.SessionTTL, time.Hour},
+		{"PA_OIDC_RECHECK_INTERVAL", &cfg.OIDCRecheck, 0},
+	} {
+		if v := os.Getenv(e.env); v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil || d < e.min {
+				return nil, fmt.Errorf("%s must be a duration >= %s", e.env, e.min)
+			}
+			*e.dst = d
+		}
+	}
+
 	if cfg.OIDCIssuer != "" {
-		if cfg.OIDCClientID == "" || cfg.SecretKey == "" {
-			return nil, errors.New("PA_OIDC_CLIENT_ID and PA_SECRET_KEY are required when PA_OIDC_ISSUER is set")
+		if cfg.OIDCClientID == "" || cfg.OIDCClientSecret == "" || cfg.SecretKey == "" {
+			return nil, errors.New("PA_OIDC_CLIENT_ID, PA_OIDC_CLIENT_SECRET and PA_SECRET_KEY are required when PA_OIDC_ISSUER is set")
 		}
 		if cfg.OIDCRedirectURL == "" {
 			cfg.OIDCRedirectURL = cfg.ExternalURL + "/auth/callback"

@@ -3,7 +3,9 @@ services:
     image: ghcr.io/prinzwalium/podcast-archiver:latest
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # Bound to localhost: put a reverse proxy in front (single-user mode
+      # has no login). Use "8080:8080" only if the proxy runs on another host.
+      - "127.0.0.1:8080:8080"
     environment:
       PUID: "1000"   # run as this UID (Unraid convention; matches file ownership on /data)
       PGID: "1000"
